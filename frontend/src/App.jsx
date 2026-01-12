@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { MapContainer, TileLayer, GeoJSON, Marker, Popup, Polyline, LayerGroup } from 'react-leaflet';
+import { MapContainer, TileLayer, GeoJSON, Marker, Popup, Polyline } from 'react-leaflet';
 import axios from 'axios';
 import 'leaflet/dist/leaflet.css';
 import './App.css';
@@ -11,6 +11,7 @@ function App() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [activeAttackLine, setActiveAttackLine] = useState(null);
 
   const handleScanArea = async () => {
     setLoading(true);
@@ -94,9 +95,22 @@ function App() {
         <p style="margin: 8px 0; font-size: 12px; color: #666; border-top: 1px solid #ddd; padding-top: 8px;">
           <b>Type:</b> ${props.type}
         </p>
+        <p style="margin: 8px 0; font-size: 11px; color: #999; font-style: italic;">
+          Click polygon to show attack vector
+        </p>
       </div>
     `;
     layer.bindPopup(popupContent);
+    
+    // Add click event to show attack vector
+    layer.on('click', () => {
+      // Calculate centroid of the polygon
+      const centroid = getCentroid(feature.geometry.coordinates);
+      const targetPosition = [parseFloat(lat), parseFloat(lon)];
+      
+      // Set active attack line
+      setActiveAttackLine([centroid, targetPosition]);
+    });
   };
 
   return (
@@ -177,7 +191,7 @@ function App() {
                 <div className="stat-item critical">
                   <span className="stat-label">Critical (&gt;80)</span>
                   <span className="stat-value">{data.stats.critical_count}</span>
-                  <span className="stat-sublabel">Attack vectors shown</span>
+                  <span className="stat-sublabel">Click sites to view vectors</span>
                 </div>
                 <div className="stat-item">
                   <span className="stat-label">Hidden Sites</span>
@@ -214,8 +228,11 @@ function App() {
                 <div style={{marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #334155'}}>
                   <div className="legend-item">
                     <span style={{display: 'inline-block', width: '24px', height: '2px', backgroundColor: '#ff0000', borderStyle: 'dashed'}}></span>
-                    <span style={{fontSize: '12px'}}>Attack Vector (Critical)</span>
+                    <span style={{fontSize: '12px'}}>Attack Vector (On Click)</span>
                   </div>
+                  <p style={{fontSize: '11px', color: '#64748b', margin: '8px 0 0 0', fontStyle: 'italic'}}>
+                    Click any polygon to show attack path
+                  </p>
                 </div>
               </div>
             </div>
@@ -229,6 +246,7 @@ function App() {
           center={[lat, lon]}
           zoom={15}
           style={{ height: '100%', width: '100%' }}
+          onClick={() => setActiveAttackLine(null)}
         >
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -277,40 +295,24 @@ function App() {
             />
           )}
 
-          {/* Attack Vectors for Critical Sites */}
-          {data && data.features && data.features.length > 0 && (
-            <LayerGroup>
-              {data.features
-                .filter(feature => feature.properties.threat_score > 80)
-                .map((feature, idx) => {
-                  // Calculate centroid of the polygon
-                  const centroid = getCentroid(feature.geometry.coordinates);
-                  const targetPosition = [parseFloat(lat), parseFloat(lon)];
-                  
-                  return (
-                    <Polyline
-                      key={`attack-vector-${idx}`}
-                      positions={[centroid, targetPosition]}
-                      color="#ff0000"
-                      weight={2}
-                      opacity={0.7}
-                      dashArray="5, 10"
-                    >
-                      <Popup>
-                        <div style={{ fontFamily: 'Arial, sans-serif' }}>
-                          <strong>Attack Vector</strong>
-                          <p style={{ margin: '4px 0', fontSize: '12px' }}>
-                            Threat Score: {feature.properties.threat_score.toFixed(1)}
-                          </p>
-                          <p style={{ margin: '4px 0', fontSize: '12px' }}>
-                            Flight Time: {feature.properties.est_flight_time.toFixed(1)}s
-                          </p>
-                        </div>
-                      </Popup>
-                    </Polyline>
-                  );
-                })}
-            </LayerGroup>
+          {/* Single Active Attack Vector (On-Demand) */}
+          {activeAttackLine && (
+            <Polyline
+              positions={activeAttackLine}
+              color="#ff0000"
+              weight={2}
+              opacity={0.8}
+              dashArray="5, 10"
+            >
+              <Popup>
+                <div style={{ fontFamily: 'Arial, sans-serif' }}>
+                  <strong>Attack Vector</strong>
+                  <p style={{ margin: '4px 0', fontSize: '12px' }}>
+                    Click another site or map to clear
+                  </p>
+                </div>
+              </Popup>
+            </Polyline>
           )}
         </MapContainer>
       </div>
