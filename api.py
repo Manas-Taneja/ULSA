@@ -4,6 +4,7 @@ Provides REST API endpoint for geospatial threat assessment
 """
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import osmnx as ox
 import geopandas as gpd
@@ -18,6 +19,20 @@ app = FastAPI(
     title="Drone Launch Site Analysis API",
     description="Geospatial analysis API for identifying and assessing potential drone launch sites",
     version="1.0.0"
+)
+
+# Enable CORS for frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",  # Vite dev server
+        "http://localhost:3000",  # Alternative port
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -240,6 +255,16 @@ def analyze_location(request: AnalysisRequest):
             request.lat, 
             request.lon
         )
+        
+        # CRITICAL: Force conversion to WGS84 (EPSG:4326) for web mapping
+        # This ensures coordinates are in Lat/Lon, not UTM meters
+        gdf_candidates = gdf_candidates.to_crs(epsg=4326)
+        
+        # Debug: Verify CRS and sample coordinates
+        print(f"✅ CRS after conversion: {gdf_candidates.crs}")
+        if len(gdf_candidates) > 0:
+            first_geom = gdf_candidates.iloc[0].geometry
+            print(f"✅ Sample coordinates: {list(first_geom.exterior.coords)[:2]}")
         
         # Calculate statistics
         stats = {
