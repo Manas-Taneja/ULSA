@@ -24,8 +24,8 @@ function App() {
         radius: parseInt(radius)
       });
 
-      console.log('📊 Analysis Response:', response.data);
-      console.log('🗺️ First Feature Coordinates:', 
+      console.log('Analysis Response:', response.data);
+      console.log('First Feature Coordinates:', 
         response.data.features[0]?.geometry?.coordinates);
       
       setData(response.data);
@@ -49,13 +49,36 @@ function App() {
 
   const onEachFeature = (feature, layer) => {
     const props = feature.properties;
+    const stealthStatus = props.is_hidden ? 'Hidden' : 'Exposed';
+    const riskLevel = props.threat_score > 80 ? 'CRITICAL' : props.threat_score > 50 ? 'HIGH' : 'MEDIUM';
+    
     const popupContent = `
-      <div style="font-family: Arial, sans-serif;">
-        <h4 style="margin: 0 0 8px 0; color: #333;">${props.type} Launch Site</h4>
-        <p style="margin: 4px 0;"><strong>Threat Score:</strong> <span style="color: #FF0033; font-weight: bold;">${props.threat_score.toFixed(1)}/100</span></p>
-        <p style="margin: 4px 0;"><strong>Stealth:</strong> ${props.is_hidden ? '🔴 HIDDEN (HIGH RISK)' : '🔵 EXPOSED'}</p>
-        <p style="margin: 4px 0;"><strong>Flight Time:</strong> <span style="color: #FF6600; font-weight: bold;">${props.est_flight_time.toFixed(1)}s</span></p>
-        <p style="margin: 4px 0;"><strong>Distance to Road:</strong> ${props.dist_to_road.toFixed(1)}m</p>
+      <div style="font-family: 'Arial', sans-serif; min-width: 250px;">
+        <h3 style="margin: 0 0 12px 0; color: #333; border-bottom: 2px solid #666; padding-bottom: 8px; font-size: 16px;">
+          Launch Site Detected
+        </h3>
+        <p style="margin: 8px 0; font-size: 14px;">
+          <b>Risk Score:</b> 
+          <span style="color: ${props.threat_score > 80 ? '#ff0000' : props.threat_score > 50 ? '#ff9900' : '#ffff00'}; font-weight: bold; font-size: 18px;">
+            ${props.threat_score.toFixed(1)}/100
+          </span>
+          <span style="color: #666; font-size: 12px;"> (${riskLevel})</span>
+        </p>
+        <p style="margin: 8px 0; font-size: 14px;">
+          <b>Stealth:</b> 
+          <span style="color: ${props.is_hidden ? '#ff0000' : '#00aaff'}; font-weight: bold;">
+            ${stealthStatus}
+          </span>
+        </p>
+        <p style="margin: 8px 0; font-size: 14px;">
+          <b>Distance to Road:</b> ${props.dist_to_road.toFixed(1)} m
+        </p>
+        <p style="margin: 8px 0; font-size: 14px;">
+          <b>Flight Time:</b> ${props.est_flight_time.toFixed(1)}s
+        </p>
+        <p style="margin: 8px 0; font-size: 12px; color: #666; border-top: 1px solid #ddd; padding-top: 8px;">
+          <b>Type:</b> ${props.type}
+        </p>
       </div>
     `;
     layer.bindPopup(popupContent);
@@ -66,7 +89,7 @@ function App() {
       {/* Sidebar */}
       <div className="sidebar">
         <div className="sidebar-header">
-          <h1>🎯 Drone Launch Site Analysis</h1>
+          <h1>Drone Launch Site Analysis</h1>
           <p className="subtitle">Geospatial Threat Assessment</p>
         </div>
 
@@ -118,7 +141,7 @@ function App() {
                 Scanning...
               </>
             ) : (
-              '🛰️ Scan Area'
+              'Scan Area'
             )}
           </button>
 
@@ -130,7 +153,7 @@ function App() {
 
           {data && (
             <div className="stats">
-              <h3>📊 Analysis Results</h3>
+              <h3>Analysis Results</h3>
               <div className="stat-grid">
                 <div className="stat-item">
                   <span className="stat-label">Total Candidates</span>
@@ -159,14 +182,18 @@ function App() {
               </div>
 
               <div className="legend">
-                <h4>Legend</h4>
+                <h4>Risk Level</h4>
                 <div className="legend-item">
-                  <span className="legend-color" style={{backgroundColor: '#FF0033', opacity: 0.8}}></span>
-                  <span>Hidden Threats (Critical)</span>
+                  <span className="legend-color" style={{backgroundColor: '#ff0000', opacity: 0.6}}></span>
+                  <span>Critical (&gt;80)</span>
                 </div>
                 <div className="legend-item">
-                  <span className="legend-color" style={{backgroundColor: '#00FFFF', opacity: 0.3}}></span>
-                  <span>Exposed Sites (Lower Risk)</span>
+                  <span className="legend-color" style={{backgroundColor: '#ff9900', opacity: 0.6}}></span>
+                  <span>High (50-80)</span>
+                </div>
+                <div className="legend-item">
+                  <span className="legend-color" style={{backgroundColor: '#ffff00', opacity: 0.6}}></span>
+                  <span>Medium (&lt;50)</span>
                 </div>
               </div>
             </div>
@@ -189,7 +216,7 @@ function App() {
           {/* Primary Asset Marker */}
           <Marker position={[lat, lon]}>
             <Popup>
-              <strong>🎯 Primary Asset</strong>
+              <strong>Primary Asset</strong>
               <br />
               Center of Analysis
             </Popup>
@@ -203,12 +230,27 @@ function App() {
                 type: "FeatureCollection",
                 features: data.features
               }}
-              style={(feature) => ({
-                fillColor: feature.properties.is_hidden ? '#FF0033' : '#00FFFF',
-                color: feature.properties.is_hidden ? '#FF0033' : '#00FFFF',
-                weight: 2,
-                fillOpacity: feature.properties.is_hidden ? 0.8 : 0.3
-              })}
+              style={(feature) => {
+                const score = feature.properties.threat_score;
+                let color;
+                
+                // Risk-based color coding
+                if (score > 80) {
+                  color = '#ff0000';  // Red (Critical)
+                } else if (score > 50) {
+                  color = '#ff9900';  // Orange (High)
+                } else {
+                  color = '#ffff00';  // Yellow (Medium)
+                }
+                
+                return {
+                  fillColor: color,
+                  color: color,
+                  weight: 1,
+                  fillOpacity: 0.6,
+                  opacity: 0.8
+                };
+              }}
               onEachFeature={onEachFeature}
             />
           )}
