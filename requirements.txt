@@ -3,3 +3,5 @@ geopandas
 folium
 shapely
 matplotlib
+fastapi
+uvicorn
