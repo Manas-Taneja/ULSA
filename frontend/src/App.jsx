@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { MapContainer, TileLayer, GeoJSON, Marker, Popup } from 'react-leaflet';
+import { MapContainer, TileLayer, GeoJSON, Marker, Popup, Polyline, LayerGroup } from 'react-leaflet';
 import axios from 'axios';
 import 'leaflet/dist/leaflet.css';
 import './App.css';
@@ -45,6 +45,21 @@ function App() {
       weight: 2,
       fillOpacity: isHidden ? 0.8 : 0.3
     };
+  };
+
+  // Helper function to calculate centroid of a polygon
+  const getCentroid = (coordinates) => {
+    // For Polygon, coordinates[0] is the outer ring
+    const ring = coordinates[0];
+    let sumLat = 0;
+    let sumLon = 0;
+    
+    for (let i = 0; i < ring.length; i++) {
+      sumLon += ring[i][0];
+      sumLat += ring[i][1];
+    }
+    
+    return [sumLat / ring.length, sumLon / ring.length];
   };
 
   const onEachFeature = (feature, layer) => {
@@ -162,6 +177,7 @@ function App() {
                 <div className="stat-item critical">
                   <span className="stat-label">Critical (&gt;80)</span>
                   <span className="stat-value">{data.stats.critical_count}</span>
+                  <span className="stat-sublabel">Attack vectors shown</span>
                 </div>
                 <div className="stat-item">
                   <span className="stat-label">Hidden Sites</span>
@@ -194,6 +210,12 @@ function App() {
                 <div className="legend-item">
                   <span className="legend-color" style={{backgroundColor: '#ffff00', opacity: 0.6}}></span>
                   <span>Medium (&lt;50)</span>
+                </div>
+                <div style={{marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #334155'}}>
+                  <div className="legend-item">
+                    <span style={{display: 'inline-block', width: '24px', height: '2px', backgroundColor: '#ff0000', borderStyle: 'dashed'}}></span>
+                    <span style={{fontSize: '12px'}}>Attack Vector (Critical)</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -253,6 +275,42 @@ function App() {
               }}
               onEachFeature={onEachFeature}
             />
+          )}
+
+          {/* Attack Vectors for Critical Sites */}
+          {data && data.features && data.features.length > 0 && (
+            <LayerGroup>
+              {data.features
+                .filter(feature => feature.properties.threat_score > 80)
+                .map((feature, idx) => {
+                  // Calculate centroid of the polygon
+                  const centroid = getCentroid(feature.geometry.coordinates);
+                  const targetPosition = [parseFloat(lat), parseFloat(lon)];
+                  
+                  return (
+                    <Polyline
+                      key={`attack-vector-${idx}`}
+                      positions={[centroid, targetPosition]}
+                      color="#ff0000"
+                      weight={2}
+                      opacity={0.7}
+                      dashArray="5, 10"
+                    >
+                      <Popup>
+                        <div style={{ fontFamily: 'Arial, sans-serif' }}>
+                          <strong>Attack Vector</strong>
+                          <p style={{ margin: '4px 0', fontSize: '12px' }}>
+                            Threat Score: {feature.properties.threat_score.toFixed(1)}
+                          </p>
+                          <p style={{ margin: '4px 0', fontSize: '12px' }}>
+                            Flight Time: {feature.properties.est_flight_time.toFixed(1)}s
+                          </p>
+                        </div>
+                      </Popup>
+                    </Polyline>
+                  );
+                })}
+            </LayerGroup>
           )}
         </MapContainer>
       </div>
