@@ -367,8 +367,9 @@ def create_map(lat, lon, gdf_candidates, output_file='dashboard.html'):
     ).add_to(m)
     
     # Create feature groups for different threat levels
-    hidden_threats = folium.FeatureGroup(name='🔴 Hidden Threats (High Risk)', show=True)
-    exposed_sites = folium.FeatureGroup(name='🔵 Exposed Sites (Lower Risk)', show=True)
+    hidden_threats = folium.FeatureGroup(name='🔴 Hidden Threats (Critical)', show=True)
+    exposed_sites = folium.FeatureGroup(name='🔵 Exposed Sites (Ghost Zones)', show=True)
+    attack_vectors = folium.FeatureGroup(name='⚠️ Attack Vectors (Top 5)', show=True)
     
     # Add candidates to appropriate layers
     if len(gdf_candidates) > 0:
@@ -381,44 +382,112 @@ def create_map(lat, lon, gdf_candidates, output_file='dashboard.html'):
             
             # Determine stealth status text
             if is_hidden:
-                stealth_status = "Hidden (High Risk)"
+                stealth_status = "🔴 HIDDEN (HIGH RISK)"
                 layer = hidden_threats
-                color = 'red'
+                fill_color = '#FF0033'  # Neon Red
+                stroke_color = '#FF0033'
+                stroke_width = 3
+                fill_opacity = 0.8
             else:
-                stealth_status = "Exposed"
+                stealth_status = "🔵 EXPOSED"
                 layer = exposed_sites
-                # Use orange for higher scores, blue for lower
-                color = 'orange' if score > 50 else 'blue'
+                fill_color = '#00FFFF'  # Cyan/Teal
+                stroke_color = '#00FFFF'
+                stroke_width = 2
+                fill_opacity = 0.3  # High transparency (ghost effect)
             
-            # Create comprehensive tooltip with all metrics
-            tooltip_text = (
-                f"<b>Type:</b> {site_type}<br>"
-                f"<b>Threat Score:</b> {score:.1f}/100<br>"
-                f"<b>Stealth:</b> {stealth_status}<br>"
-                f"<b>Dist to Road:</b> {dist:.1f}m<br>"
-                f"<b>Flight Time:</b> {flight_time:.1f}s"
-            )
+            # Create styled popup with HTML table
+            popup_html = f"""
+            <div style="font-family: Arial, sans-serif; min-width: 200px;">
+                <h4 style="margin: 0 0 10px 0; color: #333; border-bottom: 2px solid #FF0033;">
+                    {site_type} Launch Site
+                </h4>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <tr style="background-color: #f0f0f0;">
+                        <td style="padding: 5px; font-weight: bold;">Threat Score:</td>
+                        <td style="padding: 5px; text-align: right; color: #FF0033; font-weight: bold;">
+                            {score:.1f}/100
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 5px; font-weight: bold;">Stealth:</td>
+                        <td style="padding: 5px; text-align: right; font-weight: bold;">
+                            {stealth_status}
+                        </td>
+                    </tr>
+                    <tr style="background-color: #f0f0f0;">
+                        <td style="padding: 5px; font-weight: bold;">Flight Time:</td>
+                        <td style="padding: 5px; text-align: right; font-weight: bold; color: #FF6600;">
+                            {flight_time:.1f}s
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 5px;">Distance to Road:</td>
+                        <td style="padding: 5px; text-align: right;">{dist:.1f}m</td>
+                    </tr>
+                </table>
+            </div>
+            """
+            
+            # Simple tooltip
+            tooltip_text = f"Threat: {score:.1f} | {site_type} | {flight_time:.1f}s"
             
             folium.GeoJson(
                 row.geometry.__geo_interface__,
-                style_function=lambda x, color=color: {
-                    'fillColor': color,
-                    'color': 'black',
-                    'weight': 2,
-                    'fillOpacity': 0.7
+                style_function=lambda x, fc=fill_color, sc=stroke_color, sw=stroke_width, fo=fill_opacity: {
+                    'fillColor': fc,
+                    'color': sc,
+                    'weight': sw,
+                    'fillOpacity': fo
                 },
-                tooltip=folium.Tooltip(tooltip_text, sticky=True)
+                tooltip=tooltip_text,
+                popup=folium.Popup(popup_html, max_width=300)
             ).add_to(layer)
     
     # Add feature groups to map
     hidden_threats.add_to(m)
     exposed_sites.add_to(m)
     
+    # Visualize attack vectors for top 5 threats
+    print("Drawing attack vectors for top 5 threats...")
+    top_5_threats = gdf_candidates.nlargest(5, 'threat_score')
+    
+    for idx, row in top_5_threats.iterrows():
+        # Get centroid coordinates
+        centroid = row.geometry.centroid
+        launch_lat = centroid.y
+        launch_lon = centroid.x
+        
+        # Draw dashed line from launch site to primary asset
+        folium.PolyLine(
+            locations=[[launch_lat, launch_lon], [lat, lon]],
+            color='white',
+            weight=3,
+            opacity=0.9,
+            dash_array='10, 10',  # Dashed pattern
+            popup=f"<b>Attack Vector</b><br>Threat: {row['threat_score']:.1f}<br>Flight Time: {row['est_flight_time']:.1f}s"
+        ).add_to(attack_vectors)
+        
+        # Add drone icon at launch site
+        folium.Marker(
+            location=[launch_lat, launch_lon],
+            icon=folium.Icon(
+                icon='plane',
+                prefix='fa',
+                color='red',
+                icon_color='white'
+            ),
+            popup=f"<b>Launch Point #{idx+1}</b><br>Threat: {row['threat_score']:.1f}",
+            tooltip=f"Launch Site (Threat: {row['threat_score']:.1f})"
+        ).add_to(attack_vectors)
+    
+    attack_vectors.add_to(m)
+    
     # Add primary asset marker at center
     folium.Marker(
         location=[lat, lon],
-        popup='<b>Primary Asset</b><br>Center of Analysis',
-        tooltip='Primary Asset',
+        popup='<b style="color: #FF0033; font-size: 14px;">🎯 PRIMARY ASSET</b><br>Center of Analysis',
+        tooltip='🎯 PRIMARY ASSET',
         icon=folium.Icon(color='black', icon='star', prefix='fa')
     ).add_to(m)
     
@@ -428,6 +497,7 @@ def create_map(lat, lon, gdf_candidates, output_file='dashboard.html'):
     # Save map
     m.save(output_file)
     print(f"Dashboard saved to {output_file}")
+    print(f"Top 5 threats visualized with attack vectors")
 
 
 if __name__ == "__main__":
