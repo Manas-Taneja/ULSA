@@ -13,6 +13,7 @@ from shapely.ops import unary_union
 import numpy as np
 import pandas as pd
 import json
+from scipy.spatial import cKDTree
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -47,6 +48,7 @@ class AnalysisResponse(BaseModel):
     status: str
     stats: dict
     features: list
+    security_debug_layer: list
 
 
 # Core Logic Functions
@@ -89,14 +91,14 @@ def calculate_road_accessibility(gdf_candidates, G_proj, buildings_union):
 
 def calculate_security_proximity(gdf_candidates, gdf_security_proj):
     """
-    Calculate distance to nearest security presence for each candidate.
+    Calculate distance to nearest security presence using KD-Tree for accuracy.
     
     Parameters:
     -----------
     gdf_candidates : GeoDataFrame
         Launch candidates in projected UTM CRS
     gdf_security_proj : GeoDataFrame
-        Security locations in projected UTM CRS
+        Security locations in projected UTM CRS (MUST be same CRS as candidates)
         
     Returns:
     --------
@@ -104,31 +106,52 @@ def calculate_security_proximity(gdf_candidates, gdf_security_proj):
         Candidates with nearest_security_dist column added
     """
     if len(gdf_security_proj) == 0:
-        # No security presence, set large distance
-        gdf_candidates['nearest_security_dist'] = 999999
-        print("No security presence detected in area")
+        # No security presence, set large distance (no penalty applied)
+        gdf_candidates['nearest_security_dist'] = 9999
+        print("⚠️  No security presence detected in area")
         return gdf_candidates
     
-    # Get all security point coordinates
-    security_points = []
+    # Extract security node coordinates
+    # Handle both Point and Polygon geometries
+    security_coords = []
     for idx, row in gdf_security_proj.iterrows():
         if row.geometry.geom_type == 'Point':
-            security_points.append(row.geometry)
+            security_coords.append((row.geometry.x, row.geometry.y))
         elif row.geometry.geom_type in ['Polygon', 'MultiPolygon']:
-            # Use centroid for polygon features
-            security_points.append(row.geometry.centroid)
+            # Use centroid for polygon features (e.g., government buildings)
+            centroid = row.geometry.centroid
+            security_coords.append((centroid.x, centroid.y))
     
-    # Calculate distance to nearest security for each candidate
-    distances = []
+    if len(security_coords) == 0:
+        gdf_candidates['nearest_security_dist'] = 9999
+        print("⚠️  No valid security geometries found")
+        return gdf_candidates
+    
+    # Build KD-Tree for efficient nearest neighbor search
+    security_tree = cKDTree(security_coords)
+    print(f"✓ Built Security Index with {len(security_coords)} nodes")
+    
+    # Extract candidate centroids
+    candidate_coords = []
     for idx, row in gdf_candidates.iterrows():
         centroid = row.geometry.centroid
-        
-        # Find minimum distance to any security point
-        min_dist = min([centroid.distance(sec_pt) for sec_pt in security_points])
-        distances.append(min_dist)
+        candidate_coords.append((centroid.x, centroid.y))
     
+    # Query KD-Tree for nearest security node to each candidate
+    # k=1 means find the single nearest neighbor
+    distances, indices = security_tree.query(candidate_coords, k=1)
+    
+    # Assign distances to candidates
     gdf_candidates['nearest_security_dist'] = distances
-    print(f"Calculated security proximity (mean: {np.mean(distances):.1f}m)")
+    
+    # Debug logging
+    print(f"✓ Security proximity calculated:")
+    print(f"  - Mean distance: {distances.mean():.1f}m")
+    print(f"  - Min distance: {distances.min():.1f}m")
+    print(f"  - Max distance: {distances.max():.1f}m")
+    if len(gdf_candidates) > 0:
+        print(f"  - Sample (first site): {gdf_candidates.iloc[0]['nearest_security_dist']:.1f}m")
+    
     return gdf_candidates
 
 
@@ -137,7 +160,7 @@ def calculate_score(row):
     dist = row['dist_to_road']
     site_type = row['type']
     is_hidden = row['is_hidden']
-    security_dist = row.get('nearest_security_dist', 999999)
+    security_dist = row.get('nearest_security_dist', 9999)
     
     # Access Score: Linear decay from 100 (at <50m) to 0 (at >500m)
     if dist < 50:
@@ -197,19 +220,28 @@ def fetch_area_data(lat, lon, radius_meters):
     # Download road network
     G = ox.graph_from_bbox(bbox=(north, south, east, west), network_type='drive')
     
-    # Download security/guardian locations
+    # Download security/guardian locations (EXPANDED)
     print("Downloading security presence data...")
     tags_security = {
-        'amenity': ['police', 'embassy'],
-        'military': ['barracks', 'office', 'checkpoint'],
-        'man_made': ['surveillance'],
-        'building': ['government']
+        'amenity': ['police', 'fire_station', 'courthouse', 'embassy', 'prison', 'townhall'],
+        'building': ['government', 'military', 'public', 'civic'],
+        'office': ['government', 'administrative', 'diplomatic', 'political'],
+        'military': ['barracks', 'office', 'checkpoint', 'base', 'danger_area'],
+        'landuse': ['military', 'civic_admin'],
+        'man_made': ['surveillance']
     }
     try:
         gdf_security = ox.features_from_bbox(bbox=(north, south, east, west), tags=tags_security)
-        print(f"Fetched {len(gdf_security)} security/guardian locations")
+        print(f"✅ Fetched {len(gdf_security)} security/guardian locations")
+        
+        # Debug: Show breakdown by type
+        if len(gdf_security) > 0:
+            print(f"   Security breakdown by amenity: {dict(gdf_security['amenity'].value_counts()) if 'amenity' in gdf_security.columns else 'None'}")
+            print(f"   Security breakdown by building: {dict(gdf_security['building'].value_counts()) if 'building' in gdf_security.columns else 'None'}")
+            print(f"   Security breakdown by office: {dict(gdf_security['office'].value_counts()) if 'office' in gdf_security.columns else 'None'}")
+            print(f"   Geometry types: {dict(gdf_security.geometry.geom_type.value_counts())}")
     except Exception as e:
-        print(f"No security data found or error: {e}")
+        print(f"⚠️  No security data found or error: {e}")
         # Create empty GeoDataFrame if no security features found
         gdf_security = gpd.GeoDataFrame(geometry=[], crs='EPSG:4326')
     
@@ -288,12 +320,14 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_la
     gdf_candidates = calculate_road_accessibility(gdf_candidates, G_proj, buildings_union)
     
     # Project security data to UTM and calculate security proximity
+    # CRITICAL: Security data MUST be in same UTM CRS as candidates for accurate distance
     if len(gdf_security) > 0:
         gdf_security_proj = gdf_security.to_crs(utm_crs)
+        print(f"✓ Security data projected to {utm_crs}")
         gdf_candidates = calculate_security_proximity(gdf_candidates, gdf_security_proj)
     else:
-        gdf_candidates['nearest_security_dist'] = 999999
-        print("No security presence data available")
+        gdf_candidates['nearest_security_dist'] = 9999
+        print("⚠️  No security presence data available")
     
     # Apply threat scoring
     print("Calculating threat scores with stealth and security analysis...")
@@ -386,12 +420,12 @@ def analyze_location(request: AnalysisRequest):
         
         # Convert to GeoJSON features
         features = []
-        for idx, row in gdf_candidates.iterrows():
+        for feature_id, (idx, row) in enumerate(gdf_candidates.iterrows()):
             feature = {
                 "type": "Feature",
                 "geometry": row.geometry.__geo_interface__,
                 "properties": {
-                    "id": int(idx),
+                    "id": feature_id,  # Use enumerate counter instead of index
                     "type": row['type'],
                     "threat_score": float(row['threat_score']),
                     "is_hidden": bool(row['is_hidden']),
@@ -404,10 +438,34 @@ def analyze_location(request: AnalysisRequest):
             }
             features.append(feature)
         
+        # Serialize security nodes for debugging
+        security_features = []
+        if len(gdf_security) > 0:
+            # Convert security data to WGS84 for web mapping
+            gdf_security_wgs84 = gdf_security.to_crs(epsg=4326)
+            print(f"✅ Serializing {len(gdf_security_wgs84)} security nodes for debug layer")
+            
+            for sec_id, (idx, row) in enumerate(gdf_security_wgs84.iterrows()):
+                # Handle both Point and Polygon geometries
+                if row.geometry.geom_type in ['Point', 'Polygon', 'MultiPolygon']:
+                    security_feature = {
+                        "type": "Feature",
+                        "geometry": row.geometry.__geo_interface__,
+                        "properties": {
+                            "id": sec_id,  # Use enumerate counter
+                            "amenity": str(row.get('amenity', '')),
+                            "name": str(row.get('name', '')),
+                            "building": str(row.get('building', '')),
+                            "military": str(row.get('military', ''))
+                        }
+                    }
+                    security_features.append(security_feature)
+        
         return {
             "status": "success",
             "stats": stats,
-            "features": features
+            "features": features,
+            "security_debug_layer": security_features
         }
         
     except Exception as e:
