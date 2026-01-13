@@ -87,11 +87,57 @@ def calculate_road_accessibility(gdf_candidates, G_proj, buildings_union):
     return gdf_candidates
 
 
+def calculate_security_proximity(gdf_candidates, gdf_security_proj):
+    """
+    Calculate distance to nearest security presence for each candidate.
+    
+    Parameters:
+    -----------
+    gdf_candidates : GeoDataFrame
+        Launch candidates in projected UTM CRS
+    gdf_security_proj : GeoDataFrame
+        Security locations in projected UTM CRS
+        
+    Returns:
+    --------
+    GeoDataFrame
+        Candidates with nearest_security_dist column added
+    """
+    if len(gdf_security_proj) == 0:
+        # No security presence, set large distance
+        gdf_candidates['nearest_security_dist'] = 999999
+        print("No security presence detected in area")
+        return gdf_candidates
+    
+    # Get all security point coordinates
+    security_points = []
+    for idx, row in gdf_security_proj.iterrows():
+        if row.geometry.geom_type == 'Point':
+            security_points.append(row.geometry)
+        elif row.geometry.geom_type in ['Polygon', 'MultiPolygon']:
+            # Use centroid for polygon features
+            security_points.append(row.geometry.centroid)
+    
+    # Calculate distance to nearest security for each candidate
+    distances = []
+    for idx, row in gdf_candidates.iterrows():
+        centroid = row.geometry.centroid
+        
+        # Find minimum distance to any security point
+        min_dist = min([centroid.distance(sec_pt) for sec_pt in security_points])
+        distances.append(min_dist)
+    
+    gdf_candidates['nearest_security_dist'] = distances
+    print(f"Calculated security proximity (mean: {np.mean(distances):.1f}m)")
+    return gdf_candidates
+
+
 def calculate_score(row):
-    """Calculate threat score based on accessibility, stealth, and line-of-sight."""
+    """Calculate threat score based on accessibility, stealth, line-of-sight, and security presence."""
     dist = row['dist_to_road']
     site_type = row['type']
     is_hidden = row['is_hidden']
+    security_dist = row.get('nearest_security_dist', 999999)
     
     # Access Score: Linear decay from 100 (at <50m) to 0 (at >500m)
     if dist < 50:
@@ -114,10 +160,19 @@ def calculate_score(row):
         stealth_score -= 20
     
     # Total: Weighted combination (Access 60%, Stealth 40%)
-    total_score = (access_score * 0.6) + (stealth_score * 0.4)
-    total_score = min(total_score, 100)
+    raw_score = (access_score * 0.6) + (stealth_score * 0.4)
+    raw_score = min(raw_score, 100)
     
-    return round(total_score, 2)
+    # Apply security presence penalty
+    security_penalty = 0.0
+    if security_dist < 150:
+        security_penalty = 0.5  # 50% reduction within 150m
+    elif security_dist < 300:
+        security_penalty = 0.2  # 20% reduction within 300m
+    
+    final_score = raw_score * (1 - security_penalty)
+    
+    return round(final_score, 2)
 
 
 def fetch_area_data(lat, lon, radius_meters):
@@ -129,20 +184,39 @@ def fetch_area_data(lat, lon, radius_meters):
     tags_buildings = {'building': True}
     gdf_buildings = ox.features_from_bbox(bbox=(north, south, east, west), tags=tags_buildings)
     
-    # Download natural/water areas data
+    # Download natural/water areas and open spaces data (EXPANDED)
     tags_nature = {
-        'natural': ['water', 'wood'],
-        'landuse': ['forest', 'grass', 'basin']
+        'natural': ['water', 'wood', 'sand', 'earth', 'scrub'],
+        'landuse': ['forest', 'grass', 'basin', 'construction', 'brownfield', 'commercial', 'industrial'],
+        'amenity': ['parking', 'school_yard'],
+        'leisure': ['pitch', 'playground', 'common']
     }
     gdf_nature = ox.features_from_bbox(bbox=(north, south, east, west), tags=tags_nature)
+    print(f"Fetched {len(gdf_nature)} raw natural/open space candidates")
     
     # Download road network
     G = ox.graph_from_bbox(bbox=(north, south, east, west), network_type='drive')
     
-    return gdf_buildings, gdf_nature, G
+    # Download security/guardian locations
+    print("Downloading security presence data...")
+    tags_security = {
+        'amenity': ['police', 'embassy'],
+        'military': ['barracks', 'office', 'checkpoint'],
+        'man_made': ['surveillance'],
+        'building': ['government']
+    }
+    try:
+        gdf_security = ox.features_from_bbox(bbox=(north, south, east, west), tags=tags_security)
+        print(f"Fetched {len(gdf_security)} security/guardian locations")
+    except Exception as e:
+        print(f"No security data found or error: {e}")
+        # Create empty GeoDataFrame if no security features found
+        gdf_security = gpd.GeoDataFrame(geometry=[], crs='EPSG:4326')
+    
+    return gdf_buildings, gdf_nature, G, gdf_security
 
 
-def find_launch_candidates(gdf_buildings, gdf_nature, G, center_lat, center_lon):
+def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_lat, center_lon):
     """Find potential drone launch sites and score them."""
     # Estimate and project to local UTM CRS
     utm_crs = gdf_buildings.estimate_utm_crs()
@@ -167,10 +241,13 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, center_lat, center_lon)
     buildings_union = unary_union(gdf_buildings_proj.geometry)
     open_space = study_area.difference(buildings_union)
     
-    # Morphological operations to find alleys
-    wide_space = open_space.buffer(-2.5)
-    reconstructed = wide_space.buffer(2.6)
+    # Morphological operations to find alleys (RELAXED for better detection)
+    # Reduced erosion from -2.5 to -2.0 to preserve narrower passages
+    wide_space = open_space.buffer(-2.0)
+    reconstructed = wide_space.buffer(2.1)
     alleys = open_space.difference(reconstructed)
+    
+    print(f"Morphological operations complete")
     
     # Convert to GeoDataFrame
     if alleys.geom_type == 'MultiPolygon':
@@ -182,10 +259,18 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, center_lat, center_lon)
     
     gdf_alleys = gpd.GeoDataFrame(geometry=alley_polygons, crs=utm_crs)
     gdf_alleys['area'] = gdf_alleys.geometry.area
-    gdf_alleys = gdf_alleys[(gdf_alleys['area'] > 50) & (gdf_alleys['area'] < 1000)]
+    
+    print(f"Found {len(gdf_alleys)} raw alley polygons before filtering")
+    
+    # LOWERED area thresholds: min from 50 to 25, max from 1000 to 2000
+    # This captures smaller parking spots and larger open areas
+    gdf_alleys = gdf_alleys[(gdf_alleys['area'] > 25) & (gdf_alleys['area'] < 2000)]
     gdf_alleys['type'] = 'Alley'
     
+    print(f"Remaining {len(gdf_alleys)} alleys after area filtering (25-2000 m²)")
+    
     # Prepare natural areas
+    print(f"Processing {len(gdf_nature_proj)} natural/open space areas")
     gdf_nature_proj['area'] = gdf_nature_proj.geometry.area
     gdf_nature_proj['type'] = 'Vegetation'
     
@@ -196,11 +281,25 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, center_lat, center_lon)
     # Merge both datasets
     gdf_candidates = pd.concat([gdf_alleys_clean, gdf_nature_clean], ignore_index=True)
     
+    print(f"✓ Total launch candidates: {len(gdf_candidates)} (Alleys: {len(gdf_alleys)}, Open Spaces: {len(gdf_nature_clean)})")
+    print(f"✓ Area range: {gdf_candidates['area'].min():.1f} - {gdf_candidates['area'].max():.1f} m²")
+    
     # Calculate accessibility and line-of-sight
     gdf_candidates = calculate_road_accessibility(gdf_candidates, G_proj, buildings_union)
     
+    # Project security data to UTM and calculate security proximity
+    if len(gdf_security) > 0:
+        gdf_security_proj = gdf_security.to_crs(utm_crs)
+        gdf_candidates = calculate_security_proximity(gdf_candidates, gdf_security_proj)
+    else:
+        gdf_candidates['nearest_security_dist'] = 999999
+        print("No security presence data available")
+    
     # Apply threat scoring
+    print("Calculating threat scores with stealth and security analysis...")
     gdf_candidates['threat_score'] = gdf_candidates.apply(calculate_score, axis=1)
+    
+    print(f"✓ Threat scoring complete: Mean={gdf_candidates['threat_score'].mean():.1f}, Max={gdf_candidates['threat_score'].max():.1f}")
     
     # Calculate flight metrics
     DRONE_SPEED = 15  # m/s
@@ -241,7 +340,7 @@ def analyze_location(request: AnalysisRequest):
     """
     try:
         # Fetch area data
-        gdf_buildings, gdf_nature, G = fetch_area_data(
+        gdf_buildings, gdf_nature, G, gdf_security = fetch_area_data(
             request.lat, 
             request.lon, 
             request.radius
@@ -252,6 +351,7 @@ def analyze_location(request: AnalysisRequest):
             gdf_buildings, 
             gdf_nature, 
             G, 
+            gdf_security,
             request.lat, 
             request.lon
         )
@@ -279,7 +379,9 @@ def analyze_location(request: AnalysisRequest):
             "mean_threat_score": round(gdf_candidates['threat_score'].mean(), 2),
             "max_threat_score": round(gdf_candidates['threat_score'].max(), 2),
             "mean_flight_time": round(gdf_candidates['est_flight_time'].mean(), 1),
-            "min_flight_time": round(gdf_candidates['est_flight_time'].min(), 1)
+            "min_flight_time": round(gdf_candidates['est_flight_time'].min(), 1),
+            "near_security_count": len(gdf_candidates[gdf_candidates['nearest_security_dist'] < 150]),
+            "security_monitored_count": len(gdf_candidates[gdf_candidates['nearest_security_dist'] < 300])
         }
         
         # Convert to GeoJSON features
@@ -296,7 +398,8 @@ def analyze_location(request: AnalysisRequest):
                     "dist_to_road": float(row['dist_to_road']),
                     "dist_to_center": float(row['dist_to_center']),
                     "est_flight_time": float(row['est_flight_time']),
-                    "area": float(row['area'])
+                    "area": float(row['area']),
+                    "nearest_security_dist": float(row['nearest_security_dist'])
                 }
             }
             features.append(feature)

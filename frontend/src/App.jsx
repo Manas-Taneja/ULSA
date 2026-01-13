@@ -1,8 +1,17 @@
 import { useState } from 'react';
 import { MapContainer, TileLayer, GeoJSON, Marker, Popup, Polyline } from 'react-leaflet';
+import L from 'leaflet';
 import axios from 'axios';
 import 'leaflet/dist/leaflet.css';
 import './App.css';
+
+// Fix default marker icon issue with Webpack
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
+  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+});
 
 function App() {
   const [lat, setLat] = useState(28.6139);
@@ -65,6 +74,29 @@ function App() {
 
   const onEachFeature = (feature, layer) => {
     const props = feature.properties;
+    
+    // Check if this is a security node (Point) vs launch site (Polygon)
+    const isSecurityNode = feature.geometry.type === 'Point';
+    
+    if (isSecurityNode) {
+      // Simple popup for security assets
+      const securityName = props.amenity || props.name || props.building || 'Guardian';
+      const popupContent = `
+        <div style="font-family: 'Arial', sans-serif;">
+          <h3 style="margin: 0 0 8px 0; color: #00aa00; font-size: 14px;">
+            Security Asset
+          </h3>
+          <p style="margin: 4px 0; font-size: 12px;">
+            <b>Type:</b> ${securityName}
+          </p>
+        </div>
+      `;
+      layer.bindPopup(popupContent);
+      // Do NOT add attack vector click handler for security nodes
+      return;
+    }
+    
+    // Launch site logic (Polygon/MultiPolygon)
     const stealthStatus = props.is_hidden ? 'Hidden' : 'Exposed';
     const riskLevel = props.threat_score > 80 ? 'CRITICAL' : props.threat_score > 50 ? 'HIGH' : 'MEDIUM';
     
@@ -92,6 +124,12 @@ function App() {
         <p style="margin: 8px 0; font-size: 14px;">
           <b>Flight Time:</b> ${props.est_flight_time.toFixed(1)}s
         </p>
+        <p style="margin: 8px 0; font-size: 14px;">
+          <b>Security Distance:</b> 
+          <span style="color: ${props.nearest_security_dist < 150 ? '#00aa00' : props.nearest_security_dist < 300 ? '#ff9900' : '#ff0000'}; font-weight: bold;">
+            ${props.nearest_security_dist < 999 ? props.nearest_security_dist.toFixed(0) + 'm' : 'None nearby'}
+          </span>
+        </p>
         <p style="margin: 8px 0; font-size: 12px; color: #666; border-top: 1px solid #ddd; padding-top: 8px;">
           <b>Type:</b> ${props.type}
         </p>
@@ -102,7 +140,7 @@ function App() {
     `;
     layer.bindPopup(popupContent);
     
-    // Add click event to show attack vector
+    // Add click event to show attack vector (only for launch sites)
     layer.on('click', () => {
       // Calculate centroid of the polygon
       const centroid = getCentroid(feature.geometry.coordinates);
@@ -209,6 +247,14 @@ function App() {
                   <span className="stat-label">Min Flight Time</span>
                   <span className="stat-value">{data.stats.min_flight_time}s</span>
                 </div>
+                <div className="stat-item">
+                  <span className="stat-label">Near Security (&lt;150m)</span>
+                  <span className="stat-value">{data.stats.near_security_count || 0}</span>
+                </div>
+                <div className="stat-item">
+                  <span className="stat-label">Monitored (&lt;300m)</span>
+                  <span className="stat-value">{data.stats.security_monitored_count || 0}</span>
+                </div>
               </div>
 
               <div className="legend">
@@ -271,6 +317,11 @@ function App() {
                 features: data.features
               }}
               style={(feature) => {
+                // Only apply style to polygons (launch sites)
+                if (feature.geometry.type === 'Point') {
+                  return {};
+                }
+                
                 const score = feature.properties.threat_score;
                 let color;
                 
@@ -290,6 +341,19 @@ function App() {
                   fillOpacity: 0.6,
                   opacity: 0.8
                 };
+              }}
+              pointToLayer={(feature, latlng) => {
+                // Create green markers for security nodes
+                return L.marker(latlng, {
+                  icon: L.icon({
+                    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+                    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+                    iconSize: [25, 41],
+                    iconAnchor: [12, 41],
+                    popupAnchor: [1, -34],
+                    shadowSize: [41, 41]
+                  })
+                });
               }}
               onEachFeature={onEachFeature}
             />
