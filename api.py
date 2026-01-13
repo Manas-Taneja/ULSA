@@ -172,9 +172,11 @@ def calculate_score(row):
     
     # Base Stealth Score
     if site_type == 'Alley':
-        stealth_score = 80
+        stealth_score = 80      # Urban corridors - high concealment
+    elif site_type == 'Building':
+        stealth_score = 70      # Rooftops - elevated, harder to spot from ground
     else:  # Vegetation
-        stealth_score = 60
+        stealth_score = 60      # Natural cover - moderate concealment
     
     # Line-of-sight adjustment
     if is_hidden:
@@ -294,26 +296,95 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_la
     
     print(f"Found {len(gdf_alleys)} raw alley polygons before filtering")
     
-    # LOWERED area thresholds: min from 50 to 25, max from 1000 to 2000
+    # FILTER 1: Area thresholds (min 25 m², max 2000 m²)
     # This captures smaller parking spots and larger open areas
     gdf_alleys = gdf_alleys[(gdf_alleys['area'] > 25) & (gdf_alleys['area'] < 2000)]
-    gdf_alleys['type'] = 'Alley'
+    print(f"After area filter: {len(gdf_alleys)} alleys")
     
-    print(f"Remaining {len(gdf_alleys)} alleys after area filtering (25-2000 m²)")
+    # FILTER 2: Remove building edge artifacts
+    # If an alley intersects with a building, it's likely a detection artifact
+    # Keep only alleys that are truly separated from buildings (at least 1m clearance)
+    if len(gdf_alleys) > 0:
+        buildings_buffered = buildings_union.buffer(1.0)  # 1m buffer around buildings
+        
+        # Keep only alleys that DON'T intersect with buffered buildings
+        valid_alleys = []
+        for idx, row in gdf_alleys.iterrows():
+            alley_geom = row.geometry
+            # Check if alley is completely outside the buffered buildings
+            if not alley_geom.intersects(buildings_buffered):
+                valid_alleys.append(alley_geom)
+        
+        if len(valid_alleys) > 0:
+            gdf_alleys = gpd.GeoDataFrame(geometry=valid_alleys, crs=utm_crs)
+            gdf_alleys['area'] = gdf_alleys.geometry.area
+            gdf_alleys['type'] = 'Alley'
+            print(f"After building-edge filter: {len(gdf_alleys)} valid alleys (removed {len(alley_polygons) - len(gdf_alleys)} building artifacts)")
+        else:
+            # Create empty GeoDataFrame with required columns
+            gdf_alleys = gpd.GeoDataFrame(geometry=[], crs=utm_crs)
+            gdf_alleys['area'] = []
+            gdf_alleys['type'] = []
+            print(f"⚠️  All alleys were building edge artifacts - no valid alleys found")
+    else:
+        # If no alleys passed area filter, create empty GeoDataFrame with required columns
+        gdf_alleys = gpd.GeoDataFrame(geometry=[], crs=utm_crs)
+        gdf_alleys['area'] = []
+        gdf_alleys['type'] = []
+    
+    print(f"✓ Final alley count: {len(gdf_alleys)} true outdoor corridors")
     
     # Prepare natural areas
     print(f"Processing {len(gdf_nature_proj)} natural/open space areas")
+    original_count = len(gdf_nature_proj)
+    
+    # FILTER 1: Remove actual buildings that might have leaked through
+    # (e.g., leisure=stadium might have building=yes)
+    if 'building' in gdf_nature_proj.columns:
+        gdf_nature_proj = gdf_nature_proj[
+            gdf_nature_proj['building'].isnull() | (gdf_nature_proj['building'] == 'no')
+        ]
+        buildings_filtered = original_count - len(gdf_nature_proj)
+        if buildings_filtered > 0:
+            print(f"  ⚠️  Filtered out {buildings_filtered} buildings from vegetation candidates")
+    
+    # FILTER 2: Keep only Polygon and MultiPolygon geometries
+    # (Remove any points or lines that might have been fetched)
+    gdf_nature_proj = gdf_nature_proj[
+        gdf_nature_proj.geometry.geom_type.isin(['Polygon', 'MultiPolygon'])
+    ]
+    geometry_filtered = original_count - len(gdf_nature_proj)
+    if geometry_filtered > 0:
+        print(f"  ⚠️  Filtered out {geometry_filtered} non-polygon geometries from vegetation")
+    
+    print(f"  ✓ Remaining: {len(gdf_nature_proj)} valid vegetation/open space areas")
+    
     gdf_nature_proj['area'] = gdf_nature_proj.geometry.area
     gdf_nature_proj['type'] = 'Vegetation'
+    
+    # Prepare buildings as potential rooftop launch sites
+    print(f"Processing {len(gdf_buildings_proj)} buildings for rooftop analysis")
+    gdf_buildings_proj['area'] = gdf_buildings_proj.geometry.area
+    
+    # Filter buildings for viable rooftops (reasonable size range)
+    # Too small (<50 m²): sheds, garages - not viable
+    # Too large (>5000 m²): massive complexes - too risky/secured
+    gdf_buildings_filtered = gdf_buildings_proj[
+        (gdf_buildings_proj['area'] > 50) & (gdf_buildings_proj['area'] < 5000)
+    ]
+    gdf_buildings_filtered = gdf_buildings_filtered.copy()
+    gdf_buildings_filtered['type'] = 'Building'
+    print(f"  ✓ {len(gdf_buildings_filtered)} buildings qualify as potential rooftop sites (50-5000 m²)")
     
     # Keep only relevant columns for merging
     gdf_alleys_clean = gdf_alleys[['geometry', 'area', 'type']].copy()
     gdf_nature_clean = gdf_nature_proj[['geometry', 'area', 'type']].copy()
+    gdf_buildings_clean = gdf_buildings_filtered[['geometry', 'area', 'type']].copy()
     
-    # Merge both datasets
-    gdf_candidates = pd.concat([gdf_alleys_clean, gdf_nature_clean], ignore_index=True)
+    # Merge all three datasets
+    gdf_candidates = pd.concat([gdf_alleys_clean, gdf_nature_clean, gdf_buildings_clean], ignore_index=True)
     
-    print(f"✓ Total launch candidates: {len(gdf_candidates)} (Alleys: {len(gdf_alleys)}, Open Spaces: {len(gdf_nature_clean)})")
+    print(f"✓ Total launch candidates: {len(gdf_candidates)} (Alleys: {len(gdf_alleys)}, Vegetation: {len(gdf_nature_clean)}, Buildings: {len(gdf_buildings_clean)})")
     print(f"✓ Area range: {gdf_candidates['area'].min():.1f} - {gdf_candidates['area'].max():.1f} m²")
     
     # DEBUG: Verify type distribution after merge

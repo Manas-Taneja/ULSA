@@ -50,25 +50,37 @@ function App() {
   const getFeatureStyle = (feature) => {
     const props = feature.properties;
     const score = props.threat_score;
-    const isAlley = props.type === 'Alley';
+    const siteType = props.type;
     
     // Determine fill color based on risk score
     let fillColor = '#ffff00'; // Default: Yellow (Low risk)
     if (score > 80) fillColor = '#ff0000'; // Red (Critical)
     else if (score > 50) fillColor = '#ff9900'; // Orange (High)
     
-    // Distinguish Alleys with distinctive black dashed border
-    if (isAlley) {
+    // Distinguish by type
+    if (siteType === 'Alley') {
+      // Alleys: Black dashed border (urban corridors)
       return {
         fillColor: fillColor,
         color: '#000000',          // Black border
-        weight: 3,                 // Thicker border
-        dashArray: '10, 5',        // Dashed pattern (10px dash, 5px gap)
+        weight: 3,                 // Thick border
+        dashArray: '10, 5',        // Dashed pattern
         fillOpacity: 0.6
       };
     }
     
-    // Vegetation gets subtle green border
+    if (siteType === 'Building') {
+      // Buildings: Blue solid border (rooftops)
+      return {
+        fillColor: fillColor,
+        color: '#0066ff',          // Blue border
+        weight: 2,                 // Medium border
+        dashArray: null,           // Solid line
+        fillOpacity: 0.5
+      };
+    }
+    
+    // Vegetation: Green solid border (natural cover)
     return {
       fillColor: fillColor,
       color: '#00aa00',            // Green border
@@ -155,7 +167,7 @@ function App() {
           </span>
         </p>
         <p style="margin: 8px 0; font-size: 12px; color: #666; border-top: 1px solid #ddd; padding-top: 8px;">
-          <b>Type:</b> <span style="text-transform: capitalize; color: ${feature.properties.type === 'Alley' ? '#ff6600' : '#00aa00'}; font-weight: bold;">${feature.properties.type}</span>
+          <b>Type:</b> <span style="text-transform: capitalize; color: ${feature.properties.type === 'Alley' ? '#ff6600' : feature.properties.type === 'Building' ? '#0066ff' : '#00aa00'}; font-weight: bold;">${feature.properties.type}</span>
         </p>
         <p style="margin: 8px 0; font-size: 11px; color: #999; font-style: italic;">
           Click polygon to show attack vector
