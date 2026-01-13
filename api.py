@@ -316,6 +316,9 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_la
     print(f"✓ Total launch candidates: {len(gdf_candidates)} (Alleys: {len(gdf_alleys)}, Open Spaces: {len(gdf_nature_clean)})")
     print(f"✓ Area range: {gdf_candidates['area'].min():.1f} - {gdf_candidates['area'].max():.1f} m²")
     
+    # DEBUG: Verify type distribution after merge
+    print(f"✓ Type distribution after merge: {dict(gdf_candidates['type'].value_counts())}")
+    
     # Calculate accessibility and line-of-sight
     gdf_candidates = calculate_road_accessibility(gdf_candidates, G_proj, buildings_union)
     
@@ -348,6 +351,9 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_la
     
     # Project back to EPSG:4326 for GeoJSON output
     gdf_candidates = gdf_candidates.to_crs(epsg=4326)
+    
+    # DEBUG: Verify type distribution before returning
+    print(f"✓ Final type distribution (before JSON): {dict(gdf_candidates['type'].value_counts())}")
     
     return gdf_candidates
 
@@ -437,6 +443,13 @@ def analyze_location(request: AnalysisRequest):
                 }
             }
             features.append(feature)
+        
+        # DEBUG: Verify type distribution in serialized features
+        type_counts = {}
+        for f in features:
+            t = f['properties']['type']
+            type_counts[t] = type_counts.get(t, 0) + 1
+        print(f"✅ Serialized features type breakdown: {type_counts}")
         
         # Serialize security nodes for debugging
         security_features = []

@@ -48,12 +48,33 @@ function App() {
   };
 
   const getFeatureStyle = (feature) => {
-    const isHidden = feature.properties.is_hidden;
+    const props = feature.properties;
+    const score = props.threat_score;
+    const isAlley = props.type === 'Alley';
+    
+    // Determine fill color based on risk score
+    let fillColor = '#ffff00'; // Default: Yellow (Low risk)
+    if (score > 80) fillColor = '#ff0000'; // Red (Critical)
+    else if (score > 50) fillColor = '#ff9900'; // Orange (High)
+    
+    // Distinguish Alleys with distinctive black dashed border
+    if (isAlley) {
+      return {
+        fillColor: fillColor,
+        color: '#000000',          // Black border
+        weight: 3,                 // Thicker border
+        dashArray: '10, 5',        // Dashed pattern (10px dash, 5px gap)
+        fillOpacity: 0.6
+      };
+    }
+    
+    // Vegetation gets subtle green border
     return {
-      fillColor: isHidden ? '#FF0033' : '#00FFFF',
-      color: isHidden ? '#FF0033' : '#00FFFF',
-      weight: 2,
-      fillOpacity: isHidden ? 0.8 : 0.3
+      fillColor: fillColor,
+      color: '#00aa00',            // Green border
+      weight: 1,                   // Thin border
+      dashArray: null,             // Solid line
+      fillOpacity: 0.4
     };
   };
 
@@ -74,6 +95,9 @@ function App() {
 
   const onEachFeature = (feature, layer) => {
     const props = feature.properties;
+    
+    // DEBUG: Log feature properties to verify type field
+    console.log("Feature Properties:", props);
     
     // Check if this is a security node (Point) vs launch site (Polygon)
     const isSecurityNode = feature.geometry.type === 'Point';
@@ -131,7 +155,7 @@ function App() {
           </span>
         </p>
         <p style="margin: 8px 0; font-size: 12px; color: #666; border-top: 1px solid #ddd; padding-top: 8px;">
-          <b>Type:</b> ${props.type}
+          <b>Type:</b> <span style="text-transform: capitalize; color: ${feature.properties.type === 'Alley' ? '#ff6600' : '#00aa00'}; font-weight: bold;">${feature.properties.type}</span>
         </p>
         <p style="margin: 8px 0; font-size: 11px; color: #999; font-style: italic;">
           Click polygon to show attack vector
@@ -322,25 +346,8 @@ function App() {
                   return {};
                 }
                 
-                const score = feature.properties.threat_score;
-                let color;
-                
-                // Risk-based color coding
-                if (score > 80) {
-                  color = '#ff0000';  // Red (Critical)
-                } else if (score > 50) {
-                  color = '#ff9900';  // Orange (High)
-                } else {
-                  color = '#ffff00';  // Yellow (Medium)
-                }
-                
-                return {
-                  fillColor: color,
-                  color: color,
-                  weight: 1,
-                  fillOpacity: 0.6,
-                  opacity: 0.8
-                };
+                // Use our getFeatureStyle function that distinguishes Alleys from Vegetation
+                return getFeatureStyle(feature);
               }}
               pointToLayer={(feature, latlng) => {
                 // Create green markers for security nodes
