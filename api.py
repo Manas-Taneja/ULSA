@@ -15,6 +15,18 @@ import pandas as pd
 import json
 from scipy.spatial import cKDTree
 
+# AHP (Analytical Hierarchical Process) Weights for Risk Scoring Engine
+# Based on research matrix for threat assessment criteria
+AHP_WEIGHTS = {
+    "distance": 0.3629,       # Distance from Core
+    "building": 0.2924,       # Building Structures
+    "road_infra": 0.1368,     # Road Infrastructure
+    "elevation": 0.1057,      # Elevation Profile (Terrain Level)
+    "lulc": 0.1057,           # Land Use / Land Cover
+    "vlos": 0.0460,           # Visual Line of Sight
+    "terrain": 0.0254         # Terrain Type (Physical)
+}
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Drone Launch Site Analysis API",
@@ -67,9 +79,10 @@ def check_line_of_sight(centroid, nearest_node, G_proj, buildings_union):
 
 
 def calculate_road_accessibility(gdf_candidates, G_proj, buildings_union):
-    """Calculate distance to nearest road and line-of-sight for each candidate."""
+    """Calculate distance to nearest road, line-of-sight, and road type for each candidate."""
     distances = []
     hidden_status = []
+    road_types = []
     
     for idx, row in gdf_candidates.iterrows():
         centroid = row.geometry.centroid
@@ -82,9 +95,29 @@ def calculate_road_accessibility(gdf_candidates, G_proj, buildings_union):
         
         is_hidden = check_line_of_sight(centroid, nearest_node, G_proj, buildings_union)
         hidden_status.append(is_hidden)
+        
+        # Extract highway tag from nearest road edge
+        # Get edges connected to the nearest node
+        road_type = 'residential'  # Default fallback
+        if nearest_node in G_proj:
+            # Try to get highway tag from incoming or outgoing edges
+            edges = list(G_proj.edges(nearest_node, data=True))
+            if edges:
+                # Get the first edge's highway tag
+                edge_data = edges[0][2]  # Edge data dict
+                road_type = edge_data.get('highway', 'residential')
+            else:
+                # If no edges found, try reverse direction
+                reverse_edges = list(G_proj.in_edges(nearest_node, data=True))
+                if reverse_edges:
+                    edge_data = reverse_edges[0][2]
+                    road_type = edge_data.get('highway', 'residential')
+        
+        road_types.append(road_type)
     
     gdf_candidates['dist_to_road'] = distances
     gdf_candidates['is_hidden'] = hidden_status
+    gdf_candidates['nearest_road_type'] = road_types
     
     return gdf_candidates
 
@@ -155,47 +188,169 @@ def calculate_security_proximity(gdf_candidates, gdf_security_proj):
     return gdf_candidates
 
 
-def calculate_score(row):
-    """Calculate threat score based on accessibility, stealth, line-of-sight, and security presence."""
-    dist = row['dist_to_road']
+def calculate_risk_score(row):
+    """
+    Calculate threat score using AHP (Analytical Hierarchical Process) framework.
+    
+    This function implements step-wise AHP scoring:
+    - Step 1: Distance from Core (36.29% weight)
+    - Step 2: Building Structures (29.24% weight)
+    - Step 3: Road Infrastructure (13.68% weight)
+    
+    Combined, these three factors account for ~79% of the total threat weight.
+    """
+    # Get distance from site to Map Center (Target) in meters
+    dist_to_center = row.get('dist_to_center', 9999)
+    
+    # ============================================================================
+    # AHP DISTANCE SCORING (Step 1)
+    # ============================================================================
+    # Assign distance_score (1-5) based on lookup table
+    if dist_to_center < 500:
+        distance_score = 5
+    elif dist_to_center < 1000:  # 500m - 1km
+        distance_score = 4
+    elif dist_to_center < 2000:  # 1km - 2km
+        distance_score = 3
+    elif dist_to_center < 5000:  # 2km - 5km
+        distance_score = 2
+    else:  # > 5km
+        distance_score = 1
+    
+    # Normalize distance_score (1-5) to 0-100 scale
+    distance_normalized = distance_score * 20  # Score * 20 = 0-100 scale
+    
+    # Apply AHP weight for distance
+    distance_component = distance_normalized * AHP_WEIGHTS['distance']
+    
+    # ============================================================================
+    # AHP BUILDING STRUCTURES SCORING (Step 2)
+    # ============================================================================
     site_type = row['type']
     is_hidden = row['is_hidden']
+    dist_to_road = row['dist_to_road']
     security_dist = row.get('nearest_security_dist', 9999)
     
-    # Access Score: Linear decay from 100 (at <50m) to 0 (at >500m)
-    if dist < 50:
-        access_score = 100
-    elif dist > 500:
-        access_score = 0
+    # Determine Building Score (1-5) based on research table
+    building_score = 1  # Default lowest
+    
+    # Only apply building scoring to actual building sites
+    if site_type == 'Building':
+        # Get building and amenity tags (handle None/missing values)
+        building_tag = row.get('building_tag')
+        amenity_tag = row.get('amenity_tag')
+        
+        # Convert to string and lowercase for comparison (handle None/NaN)
+        building_str = str(building_tag).lower() if pd.notna(building_tag) and building_tag is not None else ''
+        amenity_str = str(amenity_tag).lower() if pd.notna(amenity_tag) and amenity_tag is not None else ''
+        
+        # Map OSM tags to Research Categories
+        # Residential (Score 5) - Highest risk: anonymity and harder to patrol
+        if (building_str in ['apartments', 'residential', 'house', 'detached', 'terrace'] or 
+            amenity_str == 'residential'):
+            building_score = 5
+        # Public/Government/Industrial (Score 3) - Moderate risk
+        elif (building_str in ['government', 'public', 'civic', 'industrial', 'warehouse', 'factory'] or 
+              amenity_str in ['police', 'townhall', 'courthouse']):
+            building_score = 3
+        # Commercial (Score 2) - Lower risk: more visible and patrolled
+        elif building_str in ['commercial', 'retail', 'office', 'shop', 'supermarket']:
+            building_score = 2
+        else:
+            # Fallback for unclassified buildings (assume moderate risk)
+            building_score = 2
     else:
-        access_score = 100 - ((dist - 50) / (500 - 50)) * 100
+        # For non-buildings (Alleys, Open Land), set score to 0 (not applicable)
+        # These will rely on LULC factor later
+        building_score = 0
     
-    # Base Stealth Score
-    if site_type == 'Alley':
-        stealth_score = 80      # Urban corridors - high concealment
-    elif site_type == 'Building':
-        stealth_score = 70      # Rooftops - elevated, harder to spot from ground
-    else:  # Vegetation
-        stealth_score = 60      # Natural cover - moderate concealment
+    # Normalize building_score (1-5) to 0-100 scale
+    building_normalized = building_score * 20  # Score * 20 = 0-100 scale
     
-    # Line-of-sight adjustment
-    if is_hidden:
-        stealth_score += 20
+    # Apply AHP weight for building structures
+    building_component = building_normalized * AHP_WEIGHTS['building']
+    
+    # ============================================================================
+    # AHP ROAD INFRASTRUCTURE SCORING (Step 3)
+    # ============================================================================
+    # Road Infrastructure Score (1-5) based on research table
+    # Better roads (expressways) are safer; unpaved/village roads are higher risk
+    road_score = 3  # Default Moderate (District Road equivalent)
+    
+    # Get road type from nearest road (captured in calculate_road_accessibility)
+    road_type = row.get('nearest_road_type', 'residential')  # Fallback to residential
+    
+    # Convert to string and lowercase for comparison
+    road_type_str = str(road_type).lower() if pd.notna(road_type) and road_type is not None else 'residential'
+    
+    # Map OSM highway tags to AHP risk scores
+    # Unpaved/Village roads - Highest risk (no cameras, no patrols)
+    if road_type_str in ['unclassified', 'track', 'path', 'service']:
+        road_score = 5
+    # Residential/Tertiary - High risk
+    elif road_type_str in ['residential', 'tertiary']:
+        road_score = 4
+    # Secondary/Primary - Moderate risk (District Road equivalent)
+    elif road_type_str in ['secondary', 'primary']:
+        road_score = 3
+    # Trunk/Motorway Link - Lower risk (Highways with some monitoring)
+    elif road_type_str in ['trunk', 'motorway_link']:
+        road_score = 2
+    # Motorway - Lowest risk (Expressway with cameras and patrols)
+    elif road_type_str == 'motorway':
+        road_score = 1
     else:
-        stealth_score -= 20
+        # Fallback for unknown road types (assume moderate risk)
+        road_score = 3
     
-    # Total: Weighted combination (Access 60%, Stealth 40%)
-    raw_score = (access_score * 0.6) + (stealth_score * 0.4)
-    raw_score = min(raw_score, 100)
+    # Normalize road_score (1-5) to 0-100 scale
+    road_normalized = road_score * 20  # Score * 20 = 0-100 scale
     
-    # Apply security presence penalty
+    # Apply AHP weight for road infrastructure
+    road_infra_component = road_normalized * AHP_WEIGHTS['road_infra']
+    
+    # Placeholder: Elevation Profile (10.57% weight)
+    # TODO: Implement elevation-based scoring
+    elevation_component = 0.0  # Placeholder
+    
+    # Placeholder: Land Use / Land Cover (10.57% weight)
+    # TODO: Implement LULC-based scoring
+    lulc_component = 0.0  # Placeholder
+    
+    # Placeholder: Visual Line of Sight (4.60% weight)
+    # Map existing is_hidden logic as temporary placeholder
+    vlos_score = 100 if is_hidden else 50
+    vlos_component = vlos_score * AHP_WEIGHTS['vlos']
+    
+    # Placeholder: Terrain Type (2.54% weight)
+    # TODO: Implement terrain type scoring
+    terrain_component = 0.0  # Placeholder
+    
+    # ============================================================================
+    # COMBINE AHP COMPONENTS
+    # ============================================================================
+    # Sum all weighted components
+    total_score = (
+        distance_component +
+        building_component +
+        road_infra_component +
+        elevation_component +
+        lulc_component +
+        vlos_component +
+        terrain_component
+    )
+    
+    # Apply security presence penalty (temporary until integrated into AHP)
     security_penalty = 0.0
     if security_dist < 150:
         security_penalty = 0.5  # 50% reduction within 150m
     elif security_dist < 300:
         security_penalty = 0.2  # 20% reduction within 300m
     
-    final_score = raw_score * (1 - security_penalty)
+    final_score = total_score * (1 - security_penalty)
+    
+    # Ensure score is within 0-100 range
+    final_score = max(0, min(100, final_score))
     
     return round(final_score, 2)
 
@@ -374,12 +529,42 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_la
     ]
     gdf_buildings_filtered = gdf_buildings_filtered.copy()
     gdf_buildings_filtered['type'] = 'Building'
-    print(f"  ✓ {len(gdf_buildings_filtered)} buildings qualify as potential rooftop sites (50-5000 m²)")
     
-    # Keep only relevant columns for merging
+    # Extract building-specific metadata for vertical accessibility analysis
+    # Parse building:levels (handle missing, string values like "2;3", etc.)
+    if 'building:levels' in gdf_buildings_filtered.columns:
+        gdf_buildings_filtered['levels'] = gdf_buildings_filtered['building:levels'].apply(
+            lambda x: int(str(x).split(';')[0]) if pd.notna(x) and str(x).replace('.','').isdigit() else 2
+        )
+    else:
+        gdf_buildings_filtered['levels'] = 2  # Conservative default
+    
+    # Extract building type and office type for AHP building scoring
+    gdf_buildings_filtered['building_type'] = gdf_buildings_filtered['building'] if 'building' in gdf_buildings_filtered.columns else None
+    gdf_buildings_filtered['office_type'] = gdf_buildings_filtered['office'] if 'office' in gdf_buildings_filtered.columns else None
+    # Preserve 'building' and 'amenity' columns for AHP building structure scoring
+    gdf_buildings_filtered['building_tag'] = gdf_buildings_filtered['building'] if 'building' in gdf_buildings_filtered.columns else None
+    gdf_buildings_filtered['amenity_tag'] = gdf_buildings_filtered['amenity'] if 'amenity' in gdf_buildings_filtered.columns else None
+    
+    print(f"  ✓ {len(gdf_buildings_filtered)} buildings qualify as potential rooftop sites (50-5000 m²)")
+    print(f"  ✓ Building levels range: {gdf_buildings_filtered['levels'].min()}-{gdf_buildings_filtered['levels'].max()} floors")
+    
+    # Keep relevant columns for merging (add metadata columns)
     gdf_alleys_clean = gdf_alleys[['geometry', 'area', 'type']].copy()
+    gdf_alleys_clean['levels'] = None
+    gdf_alleys_clean['building_type'] = None
+    gdf_alleys_clean['office_type'] = None
+    gdf_alleys_clean['building_tag'] = None
+    gdf_alleys_clean['amenity_tag'] = None
+    
     gdf_nature_clean = gdf_nature_proj[['geometry', 'area', 'type']].copy()
-    gdf_buildings_clean = gdf_buildings_filtered[['geometry', 'area', 'type']].copy()
+    gdf_nature_clean['levels'] = None
+    gdf_nature_clean['building_type'] = None
+    gdf_nature_clean['office_type'] = None
+    gdf_nature_clean['building_tag'] = None
+    gdf_nature_clean['amenity_tag'] = None
+    
+    gdf_buildings_clean = gdf_buildings_filtered[['geometry', 'area', 'type', 'levels', 'building_type', 'office_type', 'building_tag', 'amenity_tag']].copy()
     
     # Merge all three datasets
     gdf_candidates = pd.concat([gdf_alleys_clean, gdf_nature_clean, gdf_buildings_clean], ignore_index=True)
@@ -403,14 +588,9 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_la
         gdf_candidates['nearest_security_dist'] = 9999
         print("⚠️  No security presence data available")
     
-    # Apply threat scoring
-    print("Calculating threat scores with stealth and security analysis...")
-    gdf_candidates['threat_score'] = gdf_candidates.apply(calculate_score, axis=1)
-    
-    print(f"✓ Threat scoring complete: Mean={gdf_candidates['threat_score'].mean():.1f}, Max={gdf_candidates['threat_score'].max():.1f}")
-    
-    # Calculate flight metrics
-    DRONE_SPEED = 15  # m/s
+    # Calculate distance to center (Map Center / Target) for AHP distance scoring
+    # This must be done before scoring so it's available in calculate_risk_score
+    print("Calculating distances to map center for AHP distance scoring...")
     dist_to_center = []
     for idx, row in gdf_candidates.iterrows():
         centroid = row.geometry.centroid
@@ -418,6 +598,16 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_la
         dist_to_center.append(dist)
     
     gdf_candidates['dist_to_center'] = dist_to_center
+    
+    # Apply AHP-based threat scoring
+    print("Calculating threat scores using AHP framework...")
+    print(f"Applying AHP Distance Weight: {AHP_WEIGHTS['distance']}")
+    gdf_candidates['threat_score'] = gdf_candidates.apply(calculate_risk_score, axis=1)
+    
+    print(f"✓ Threat scoring complete: Mean={gdf_candidates['threat_score'].mean():.1f}, Max={gdf_candidates['threat_score'].max():.1f}")
+    
+    # Calculate flight metrics
+    DRONE_SPEED = 15  # m/s
     gdf_candidates['est_flight_time'] = gdf_candidates['dist_to_center'] / DRONE_SPEED
     
     # Project back to EPSG:4326 for GeoJSON output
@@ -510,7 +700,11 @@ def analyze_location(request: AnalysisRequest):
                     "dist_to_center": float(row['dist_to_center']),
                     "est_flight_time": float(row['est_flight_time']),
                     "area": float(row['area']),
-                    "nearest_security_dist": float(row['nearest_security_dist'])
+                    "nearest_security_dist": float(row['nearest_security_dist']),
+                    # Building-specific metadata
+                    "levels": int(row['levels']) if pd.notna(row.get('levels')) else None,
+                    "building_type": str(row['building_type']) if pd.notna(row.get('building_type')) else None,
+                    "office_type": str(row['office_type']) if pd.notna(row.get('office_type')) else None
                 }
             }
             features.append(feature)
