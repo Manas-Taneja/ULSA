@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import json
 from scipy.spatial import cKDTree
+import requests
+import time
 
 # AHP (Analytical Hierarchical Process) Weights for Risk Scoring Engine
 # Based on research matrix for threat assessment criteria
@@ -188,16 +190,91 @@ def calculate_security_proximity(gdf_candidates, gdf_security_proj):
     return gdf_candidates
 
 
-def calculate_risk_score(row):
+def get_elevations(coords_list):
+    """
+    Fetch elevations in batches with retry logic and increased timeout.
+    
+    Processes coordinates in chunks of 50 to avoid 414 URI Too Long errors.
+    Implements retry logic (3 attempts) with 30-second timeout per attempt.
+    If a specific chunk fails after all retries, appends 0s for that chunk but continues processing others.
+    
+    Parameters:
+    -----------
+    coords_list : list of tuples
+        List of (lat, lon) coordinate pairs
+        
+    Returns:
+    --------
+    list
+        List of elevation values in meters (same length as coords_list)
+    """
+    BATCH_SIZE = 50
+    all_elevations = []
+    url = "https://api.opentopodata.org/v1/srtm30m"
+    
+    total_batches = (len(coords_list) + BATCH_SIZE - 1) // BATCH_SIZE
+    print(f"  Processing {len(coords_list)} coordinates in {total_batches} batch(es)...")
+    
+    for i in range(0, len(coords_list), BATCH_SIZE):
+        chunk = coords_list[i : i + BATCH_SIZE]
+        batch_num = i // BATCH_SIZE + 1
+        locations = "|".join([f"{lat},{lon}" for lat, lon in chunk])
+        
+        chunk_success = False
+        
+        # Retry Loop (3 attempts)
+        for attempt in range(3):
+            try:
+                # Increased timeout to 30s
+                response = requests.get(url, params={"locations": locations}, timeout=30)
+                
+                if response.status_code == 200:
+                    results = response.json().get('results', [])
+                    chunk_elevs = [r.get('elevation') or 0 for r in results]
+                    all_elevations.extend(chunk_elevs)
+                    chunk_success = True
+                    print(f"  ✓ Batch {batch_num}/{total_batches}: {len(chunk_elevs)} elevations fetched")
+                    break  # Success, move to next chunk
+                else:
+                    print(f"  ⚠️  Batch {batch_num}/{total_batches} attempt {attempt+1}/3 failed: HTTP {response.status_code}")
+                    if attempt < 2:  # Don't sleep after last attempt
+                        time.sleep(1)  # Wait before retry
+                    
+            except Exception as e:
+                print(f"  ⚠️  Batch {batch_num}/{total_batches} attempt {attempt+1}/3 error: {e}")
+                if attempt < 2:  # Don't sleep after last attempt
+                    time.sleep(1)  # Wait before retry
+        
+        # If all retries failed, fill with 0s
+        if not chunk_success:
+            print(f"  ⚠️  Batch {batch_num}/{total_batches} failed permanently. Using default 0m.")
+            all_elevations.extend([0] * len(chunk))
+    
+    print(f"✓ Total elevations fetched: {len(all_elevations)}/{len(coords_list)}")
+    return all_elevations
+
+
+def calculate_risk_score(row, target_elevation=0):
     """
     Calculate threat score using AHP (Analytical Hierarchical Process) framework.
     
-    This function implements step-wise AHP scoring:
+    This function implements complete AHP scoring with all 7 research factors:
     - Step 1: Distance from Core (36.29% weight)
     - Step 2: Building Structures (29.24% weight)
     - Step 3: Road Infrastructure (13.68% weight)
+    - Step 4: Land Use / Land Cover (10.57% weight)
+    - Step 5: Visual Line of Sight (4.60% weight)
+    - Step 6: Terrain Type (2.54% weight)
+    - Step 7: Elevation Profile (10.57% weight) - Uses OpenTopoData API
     
-    Combined, these three factors account for ~79% of the total threat weight.
+    All factors are normalized to 0-100 scale and weighted according to research matrix.
+    
+    Parameters:
+    -----------
+    row : pandas.Series
+        Row from GeoDataFrame with all required properties
+    target_elevation : float, optional
+        Elevation of the target/core location in meters (default: 0)
     """
     # Get distance from site to Map Center (Target) in meters
     dist_to_center = row.get('dist_to_center', 9999)
@@ -228,8 +305,6 @@ def calculate_risk_score(row):
     # ============================================================================
     site_type = row['type']
     is_hidden = row['is_hidden']
-    dist_to_road = row['dist_to_road']
-    security_dist = row.get('nearest_security_dist', 9999)
     
     # Determine Building Score (1-5) based on research table
     building_score = 1  # Default lowest
@@ -309,27 +384,105 @@ def calculate_risk_score(row):
     # Apply AHP weight for road infrastructure
     road_infra_component = road_normalized * AHP_WEIGHTS['road_infra']
     
-    # Placeholder: Elevation Profile (10.57% weight)
-    # TODO: Implement elevation-based scoring
-    elevation_component = 0.0  # Placeholder
+    # ============================================================================
+    # AHP LAND USE / LAND COVER SCORING (Step 4)
+    # ============================================================================
+    # LULC Score (1-5) based on research table
+    lulc_score = 3  # Default Moderate
     
-    # Placeholder: Land Use / Land Cover (10.57% weight)
-    # TODO: Implement LULC-based scoring
-    lulc_component = 0.0  # Placeholder
+    # Get natural and landuse tags (handle None/missing values)
+    natural_tag = row.get('natural_tag')
+    landuse_tag = row.get('landuse_tag')
     
-    # Placeholder: Visual Line of Sight (4.60% weight)
-    # Map existing is_hidden logic as temporary placeholder
-    vlos_score = 100 if is_hidden else 50
-    vlos_component = vlos_score * AHP_WEIGHTS['vlos']
+    # Convert to string and lowercase for comparison
+    natural_str = str(natural_tag).lower() if pd.notna(natural_tag) and natural_tag is not None else ''
+    landuse_str = str(landuse_tag).lower() if pd.notna(landuse_tag) and landuse_tag is not None else ''
     
-    # Placeholder: Terrain Type (2.54% weight)
-    # TODO: Implement terrain type scoring
-    terrain_component = 0.0  # Placeholder
+    # Score 5: Barren/Open/High Utility (Alleys treated as high-utility paved paths)
+    if (site_type == 'Alley' or
+        natural_str in ['sand', 'scree', 'bare_rock', 'scrub', 'heath'] or
+        landuse_str in ['brownfield', 'construction', 'landfill']):
+        lulc_score = 5
+    # Score 3: Fallow/Transition
+    elif landuse_str in ['meadow', 'grass', 'greenfield', 'recreation_ground', 'village_green']:
+        lulc_score = 3
+    # Score 2: Agricultural
+    elif landuse_str in ['farmland', 'farm', 'orchard', 'vineyard', 'allotments']:
+        lulc_score = 2
+    else:
+        # Default: Moderate (Score 3)
+        lulc_score = 3
+    
+    # Normalize lulc_score (1-5) to 0-100 scale
+    lulc_normalized = lulc_score * 20  # Score * 20 = 0-100 scale
+    
+    # Apply AHP weight for LULC
+    lulc_component = lulc_normalized * AHP_WEIGHTS['lulc']
+    
+    # ============================================================================
+    # AHP VISUAL LINE OF SIGHT SCORING (Step 5)
+    # ============================================================================
+    # VLOS Score (1-5): "Beyond VLOS" (Hidden from view) is a higher threat
+    # Score 5: Hidden from view (is_hidden = True)
+    # Score 1: Visible (is_hidden = False)
+    vlos_score = 5 if is_hidden else 1
+    
+    # Normalize vlos_score (1-5) to 0-100 scale
+    vlos_normalized = vlos_score * 20  # Score * 20 = 0-100 scale
+    
+    # Apply AHP weight for VLOS
+    vlos_component = vlos_normalized * AHP_WEIGHTS['vlos']
+    
+    # ============================================================================
+    # AHP TERRAIN TYPE SCORING (Step 6)
+    # ============================================================================
+    # Terrain Score (1-5) based on research table
+    terrain_score = 2  # Default Plain Area
+    
+    # Score 5: Hills/Advantage (elevated positions)
+    if natural_str in ['peak', 'cliff', 'ridge', 'rock']:
+        terrain_score = 5
+    # Score 4: Waterbody (hard to access but high concealment)
+    elif natural_str in ['water', 'wetland', 'bay']:
+        terrain_score = 4
+    else:
+        # Score 2: Plain Area (default for everything else including Alleys/Buildings)
+        terrain_score = 2
+    
+    # Normalize terrain_score (1-5) to 0-100 scale
+    terrain_normalized = terrain_score * 20  # Score * 20 = 0-100 scale
+    
+    # Apply AHP weight for terrain type
+    terrain_component = terrain_normalized * AHP_WEIGHTS['terrain']
+    
+    # ============================================================================
+    # AHP ELEVATION PROFILE SCORING (Step 7)
+    # ============================================================================
+    # Research: Above Core=5, On Core=3, Below Core=2
+    # Compare site elevation to target elevation
+    site_z = row.get('elevation_z', 0)
+    diff = site_z - target_elevation
+    
+    # Determine elevation score based on difference
+    if diff > 10:  # Significantly higher (advantageous position)
+        elevation_score = 5
+    elif diff < -10:  # Significantly lower (disadvantageous)
+        elevation_score = 2
+    else:  # Roughly level (neutral)
+        elevation_score = 3
+    
+    # Normalize elevation_score (1-5) to 0-100 scale
+    elevation_normalized = elevation_score * 20  # Score * 20 = 0-100 scale
+    
+    # Apply AHP weight for elevation profile
+    elevation_component = elevation_normalized * AHP_WEIGHTS['elevation']
     
     # ============================================================================
     # COMBINE AHP COMPONENTS
     # ============================================================================
     # Sum all weighted components
+    # Note: Security presence is not explicitly weighted in AHP matrix,
+    # but is implicitly considered through proximity to security locations
     total_score = (
         distance_component +
         building_component +
@@ -340,17 +493,8 @@ def calculate_risk_score(row):
         terrain_component
     )
     
-    # Apply security presence penalty (temporary until integrated into AHP)
-    security_penalty = 0.0
-    if security_dist < 150:
-        security_penalty = 0.5  # 50% reduction within 150m
-    elif security_dist < 300:
-        security_penalty = 0.2  # 20% reduction within 300m
-    
-    final_score = total_score * (1 - security_penalty)
-    
     # Ensure score is within 0-100 range
-    final_score = max(0, min(100, final_score))
+    final_score = max(0, min(100, total_score))
     
     return round(final_score, 2)
 
@@ -517,6 +661,10 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_la
     gdf_nature_proj['area'] = gdf_nature_proj.geometry.area
     gdf_nature_proj['type'] = 'Vegetation'
     
+    # Preserve natural and landuse tags for AHP LULC and terrain scoring
+    gdf_nature_proj['natural_tag'] = gdf_nature_proj['natural'] if 'natural' in gdf_nature_proj.columns else None
+    gdf_nature_proj['landuse_tag'] = gdf_nature_proj['landuse'] if 'landuse' in gdf_nature_proj.columns else None
+    
     # Prepare buildings as potential rooftop launch sites
     print(f"Processing {len(gdf_buildings_proj)} buildings for rooftop analysis")
     gdf_buildings_proj['area'] = gdf_buildings_proj.geometry.area
@@ -556,8 +704,10 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_la
     gdf_alleys_clean['office_type'] = None
     gdf_alleys_clean['building_tag'] = None
     gdf_alleys_clean['amenity_tag'] = None
+    gdf_alleys_clean['natural_tag'] = None
+    gdf_alleys_clean['landuse_tag'] = None
     
-    gdf_nature_clean = gdf_nature_proj[['geometry', 'area', 'type']].copy()
+    gdf_nature_clean = gdf_nature_proj[['geometry', 'area', 'type', 'natural_tag', 'landuse_tag']].copy()
     gdf_nature_clean['levels'] = None
     gdf_nature_clean['building_type'] = None
     gdf_nature_clean['office_type'] = None
@@ -565,6 +715,8 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_la
     gdf_nature_clean['amenity_tag'] = None
     
     gdf_buildings_clean = gdf_buildings_filtered[['geometry', 'area', 'type', 'levels', 'building_type', 'office_type', 'building_tag', 'amenity_tag']].copy()
+    gdf_buildings_clean['natural_tag'] = None
+    gdf_buildings_clean['landuse_tag'] = None
     
     # Merge all three datasets
     gdf_candidates = pd.concat([gdf_alleys_clean, gdf_nature_clean, gdf_buildings_clean], ignore_index=True)
@@ -599,10 +751,46 @@ def find_launch_candidates(gdf_buildings, gdf_nature, G, gdf_security, center_la
     
     gdf_candidates['dist_to_center'] = dist_to_center
     
-    # Apply AHP-based threat scoring
+    # Fetch elevations for AHP elevation scoring
+    print("Fetching elevation data from OpenTopoData API...")
+    
+    # Step A: Fetch elevation for Map Center (Target)
+    target_elevation = 0
+    try:
+        target_elevations = get_elevations([(center_lat, center_lon)])
+        target_elevation = target_elevations[0] if target_elevations else 0
+        print(f"✓ Target elevation: {target_elevation:.1f}m")
+    except Exception as e:
+        print(f"⚠️  Failed to fetch target elevation: {e}")
+    
+    # Step B & C: Extract candidate centroids and batch fetch elevations
+    # Convert UTM centroids back to lat/lon for API
+    candidate_coords_wgs84 = []
+    for idx, row in gdf_candidates.iterrows():
+        centroid = row.geometry.centroid
+        # Convert UTM coordinates to WGS84 (lat, lon)
+        point_wgs84 = gpd.GeoDataFrame(
+            geometry=[centroid],
+            crs=utm_crs
+        ).to_crs(epsg=4326)
+        lon, lat = point_wgs84.geometry.x.values[0], point_wgs84.geometry.y.values[0]
+        candidate_coords_wgs84.append((lat, lon))
+    
+    # Step C: Batch fetch elevations
+    print(f"Fetching elevations for {len(candidate_coords_wgs84)} candidates in batches...")
+    candidate_elevations = get_elevations(candidate_coords_wgs84)
+    
+    # Step D: Assign elevation values to candidates
+    gdf_candidates['elevation_z'] = candidate_elevations
+    print(f"✓ Elevation data assigned: Mean={np.mean(candidate_elevations):.1f}m, Range={np.min(candidate_elevations):.1f}-{np.max(candidate_elevations):.1f}m")
+    
+    # Apply AHP-based threat scoring (pass target_elevation as closure variable)
     print("Calculating threat scores using AHP framework...")
     print(f"Applying AHP Distance Weight: {AHP_WEIGHTS['distance']}")
-    gdf_candidates['threat_score'] = gdf_candidates.apply(calculate_risk_score, axis=1)
+    gdf_candidates['threat_score'] = gdf_candidates.apply(
+        lambda row: calculate_risk_score(row, target_elevation), 
+        axis=1
+    )
     
     print(f"✓ Threat scoring complete: Mean={gdf_candidates['threat_score'].mean():.1f}, Max={gdf_candidates['threat_score'].max():.1f}")
     
@@ -701,6 +889,10 @@ def analyze_location(request: AnalysisRequest):
                     "est_flight_time": float(row['est_flight_time']),
                     "area": float(row['area']),
                     "nearest_security_dist": float(row['nearest_security_dist']),
+                    "nearest_road_type": str(row['nearest_road_type']) if pd.notna(row.get('nearest_road_type')) else None,
+                    "natural_tag": str(row['natural_tag']) if pd.notna(row.get('natural_tag')) else None,
+                    "landuse_tag": str(row['landuse_tag']) if pd.notna(row.get('landuse_tag')) else None,
+                    "elevation_z": float(row['elevation_z']) if pd.notna(row.get('elevation_z')) else 0.0,
                     # Building-specific metadata
                     "levels": int(row['levels']) if pd.notna(row.get('levels')) else None,
                     "building_type": str(row['building_type']) if pd.notna(row.get('building_type')) else None,

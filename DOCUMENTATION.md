@@ -1,58 +1,99 @@
-# Drone Launch Site Analysis - Technical Documentation
+# DTRAS: Drone Threat Risk Analysis System v2.0
 
-## Table of Contents
-1. [System Overview](#system-overview)
-2. [Architecture](#architecture)
-3. [Data Ingestion](#data-ingestion)
-4. [Mathematical Algorithms](#mathematical-algorithms)
-5. [Threat Scoring Model](#threat-scoring-model)
-6. [API Flow](#api-flow)
-7. [Frontend Visualization](#frontend-visualization)
-8. [Output Format](#output-format)
+## 1. System Overview
 
----
-
-## System Overview
-
-This system performs geospatial analysis to identify and assess potential drone launch sites near critical infrastructure. It combines OpenStreetMap data, geometric analysis, and threat modeling to provide actionable intelligence for security assessments.
+**DTRAS (Drone Threat Risk Analysis System)** is an automated geospatial intelligence tool that identifies and rates potential drone launch sites based on the **Analytical Hierarchical Process (AHP)** methodology. It replaces manual QGIS workflows with a "Zero-Human-In-The-Loop" web application, providing real-time threat assessment for critical infrastructure protection.
 
 **Core Capabilities:**
-- Automated identification of concealed launch sites
-- Line-of-sight visibility analysis
-- Road network accessibility assessment
-- Flight time estimation
-- Interactive threat visualization
+- Automated identification of concealed launch sites (Alleys, Vegetation, Building Rooftops)
+- Multi-factor threat scoring using research-based AHP weights
+- 360° Ray-tracing for line-of-sight visibility analysis
+- Security proximity detection (Guardian Layer)
+- Elevation-aware terrain analysis
+- Interactive web-based visualization
+- Intelligence reporting (CSV export)
 
 ---
 
-## Architecture
+## 2. Methodology: The AHP Model
+
+The system calculates a **Threat Score (0-100)** using 7 weighted factors derived from research-based threat assessment criteria. Each factor is normalized to a 0-100 scale and weighted according to the AHP matrix.
+
+### AHP Factor Breakdown
+
+| Factor | Weight | Logic | Score Range |
+| :--- | :--- | :--- | :--- |
+| **1. Distance to Core** | **36.29%** | Closer = Higher Risk. <500m = Score 5, >5km = Score 1. | 1-5 (normalized to 0-100) |
+| **2. Building Structure** | **29.24%** | Residential (5) > Govt/Public (3) > Commercial (2). Only applies to Building-type sites. | 1-5 (normalized to 0-100) |
+| **3. Road Infrastructure**| **13.68%** | Unpaved/Village Roads (5) > Residential (4) > Expressways (1). Based on OSM highway tags. | 1-5 (normalized to 0-100) |
+| **4. Elevation Profile** | **10.57%** | High Ground Advantage. >10m above target = Score 5, >10m below = Score 2, level = Score 3. | 1-5 (normalized to 0-100) |
+| **5. Land Use (LULC)** | **10.57%** | Alleys/Barren (5) > Fallow/Grass (3) > Agriculture (2). Based on natural/landuse OSM tags. | 1-5 (normalized to 0-100) |
+| **6. Visual Line of Sight**| **4.60%** | Hidden Sites (5) > Exposed Sites (1). Ray-tracing from site to nearest road. | 1-5 (normalized to 0-100) |
+| **7. Terrain Type** | **2.54%** | Hills/Peaks (5) > Water/Wetlands (4) > Plains (2). Based on natural OSM tags. | 1-5 (normalized to 0-100) |
+
+### Threat Score Calculation
+
+```
+Threat Score = Σ(Component_i × Weight_i)
+
+Where:
+- Component_i = Normalized score (0-100) for factor i
+- Weight_i = AHP weight for factor i
+- Final score capped at 0-100
+```
+
+### Score Interpretation
+
+- **80-100:** Critical threat (immediate attention required)
+- **50-80:** High threat (priority monitoring)
+- **0-50:** Medium threat (routine surveillance)
+
+### Example Calculation
+
+**Site:** Residential Building, 300m from core, hidden from road, 15m elevation advantage, unpaved road access
+
+```
+Distance:     5 × 20 × 0.3629 = 36.29
+Building:     5 × 20 × 0.2924 = 29.24
+Road:         5 × 20 × 0.1368 = 13.68
+Elevation:    5 × 20 × 0.1057 = 10.57
+LULC:         3 × 20 × 0.1057 = 6.34
+VLOS:         5 × 20 × 0.0460 = 4.60
+Terrain:      2 × 20 × 0.0254 = 1.02
+─────────────────────────────────────
+Total:                             101.74 → 100.00 (capped)
+Result:        CRITICAL (>80)
+```
+
+---
+
+## 3. Technical Architecture
 
 ### Technology Stack
 
 **Backend:**
-- Python 3.12
-- FastAPI (REST API)
-- OSMnx (OpenStreetMap data)
-- GeoPandas (Geospatial operations)
-- Shapely (Geometric computations)
-- NetworkX (Graph analysis)
+- **Python 3.12+** - Core language
+- **FastAPI** - REST API framework
+- **OSMnx** - OpenStreetMap data retrieval
+- **GeoPandas** - Geospatial operations
+- **Shapely** - Geometric computations
+- **NetworkX** - Road network graph analysis
+- **Scikit-Learn (cKDTree)** - Efficient spatial indexing for security proximity
+- **Requests** - HTTP client for elevation API
 
 **Frontend:**
-- React 18
-- Vite (Build tool)
-- React-Leaflet (Map visualization)
-- Axios (HTTP client)
+- **React 19** - UI framework
+- **Vite** - Build tool and dev server
+- **React-Leaflet** - Interactive map visualization
+- **Axios** - HTTP client
 
-**Data Sources:**
-- OpenStreetMap (Buildings, natural areas, road network)
-
-### System Diagram
+### System Flow
 
 ```
 ┌─────────────────┐
-│   Frontend      │
-│   (React)       │
-└────────┬────────┘
+│   React Frontend │
+│   (Vite Dev)     │
+└────────┬─────────┘
          │ HTTP POST /analyze
          │ {lat, lon, radius}
          ↓
@@ -62,443 +103,193 @@ This system performs geospatial analysis to identify and assess potential drone 
 └────────┬────────┘
          │
          ├─→ OSMnx ──→ OpenStreetMap API
-         │   (Download spatial data)
+         │   (Buildings, Roads, Natural Areas, Security Assets)
          │
-         ├─→ Geometric Analysis
-         │   (Find alleys, calculate metrics)
+         ├─→ OpenTopoData API
+         │   (SRTM 30m Elevation Data)
          │
-         └─→ Threat Assessment
-             (Score and rank sites)
+         ├─→ Morphological Analysis
+         │   (Alley Detection via Erosion/Dilation)
+         │
+         ├─→ Geometric Processing
+         │   (Line-of-Sight Ray-Tracing, Distance Calculations)
+         │
+         ├─→ Spatial Indexing (KD-Tree)
+         │   (Security Proximity Analysis)
+         │
+         └─→ AHP Threat Scoring
+             (7-Factor Weighted Calculation)
          ↓
 ┌─────────────────┐
 │   GeoJSON       │
 │   Response      │
+│   + Statistics  │
 └─────────────────┘
 ```
 
----
+### Data Sources
 
-## Data Ingestion
+1. **OpenStreetMap (OSM)**
+   - Building footprints and types
+   - Road network (highway classification)
+   - Natural areas (water, wood, sand, etc.)
+   - Land use (forest, grass, construction, etc.)
+   - Security assets (police, military, government buildings)
 
-### 1. Bounding Box Calculation
-
-Given a center point (lat, lon) and radius (meters), the system calculates a geographic bounding box:
-
-```python
-bbox = ox.utils_geo.bbox_from_point((lat, lon), dist=radius_meters)
-# Returns: (north, south, east, west)
-```
-
-**Mathematical Approach:**
-- Uses Haversine formula to calculate corner coordinates
-- Accounts for Earth's curvature
-- Returns decimal degree coordinates
-
-### 2. OpenStreetMap Data Retrieval
-
-Three datasets are downloaded from OSM within the bounding box:
-
-#### A. Buildings Layer
-```python
-tags = {'building': True}
-gdf_buildings = ox.features_from_bbox(bbox, tags=tags)
-```
-
-**Retrieved Data:**
-- Building footprints (polygons)
-- Building types (residential, commercial, etc.)
-- Address information (if available)
-
-#### B. Natural/Vegetation Areas
-```python
-tags = {
-    'natural': ['water', 'wood'],
-    'landuse': ['forest', 'grass', 'basin']
-}
-gdf_nature = ox.features_from_bbox(bbox, tags=tags)
-```
-
-**Retrieved Data:**
-- Parks and green spaces
-- Forests and wooded areas
-- Water bodies
-- Open fields
-
-#### C. Road Network
-```python
-G = ox.graph_from_bbox(bbox, network_type='drive')
-```
-
-**Retrieved Data:**
-- Drivable road segments (edges)
-- Road intersections (nodes)
-- Road types and speeds
-- Network topology
-
-### 3. Coordinate System Transformation
-
-All data is initially in WGS84 (EPSG:4326) but transformed to local UTM for metric calculations:
-
-```python
-utm_crs = gdf_buildings.estimate_utm_crs()
-gdf_buildings_proj = gdf_buildings.to_crs(utm_crs)
-```
-
-**Why UTM?**
-- Preserves distances and areas in meters
-- Required for accurate buffer operations
-- Enables precise geometric calculations
-
-**Final Step:**
-- All results converted back to WGS84 for web mapping
+2. **OpenTopoData API**
+   - SRTM 30m Global Elevation Data
+   - Batch processing (50 coordinates per request)
+   - Retry logic with 30-second timeout
 
 ---
 
-## Mathematical Algorithms
+## 4. Key Features
 
-### 1. Alley Detection (Morphological Analysis)
+### 4.1 Morphological Detection
 
-**Objective:** Identify narrow corridors between buildings that could serve as concealed launch sites.
+**Alley Detection Algorithm:**
+- Uses morphological erosion/dilation to identify narrow corridors between buildings
+- Erosion: `buffer(-2.0m)` removes gaps <4m wide
+- Dilation: `buffer(2.1m)` reconstructs larger spaces
+- Difference operation extracts alleys (4-10m wide passages)
+- Filters: Area 25-2000 m², removes building edge artifacts
 
-#### Algorithm Steps:
+**Candidate Types:**
+- **Alley:** Narrow urban corridors
+- **Vegetation:** Parks, forests, open spaces
+- **Building:** Rooftops (50-5000 m², filtered by size)
 
-**Step 1: Define Study Area**
-```python
-study_area = box(*gdf_buildings_proj.total_bounds)
-```
-Creates a rectangular polygon encompassing all buildings.
+### 4.2 Stealth Analysis
 
-**Step 2: Calculate Open Space**
-```python
-buildings_union = unary_union(gdf_buildings_proj.geometry)
-open_space = study_area.difference(buildings_union)
-```
-Subtracts building footprints from study area to find unoccupied space.
+**Line-of-Sight Ray-Tracing:**
+- Creates straight line from launch site centroid to nearest road node
+- Checks intersection with building union geometry
+- Result: `is_hidden = True` if line intersects buildings
+- Used in AHP VLOS scoring (4.60% weight)
 
-**Step 3: Morphological Erosion**
-```python
-wide_space = open_space.buffer(-2.5)
-```
-Shrinks open space by 2.5 meters. Any gap narrower than 5 meters (2.5m × 2) vanishes.
+### 4.3 Security Proximity (Guardian Layer)
 
-**Mathematical Principle:**
-- Buffer distance = -2.5m (negative = inward)
-- Total filter = 2 × 2.5m = 5m minimum width
-- Removes noise and very narrow passages
+**Security Asset Detection:**
+- Automatically identifies:
+  - Police stations, fire stations, courthouses
+  - Government buildings, embassies, military facilities
+  - Civic administration offices
+- Uses KD-Tree spatial index for efficient nearest neighbor search
+- Calculates `nearest_security_dist` for each candidate
+- Visualized as green markers on map
 
-**Step 4: Morphological Dilation**
-```python
-reconstructed = wide_space.buffer(2.6)
-```
-Expands the eroded space by 2.6 meters (slightly more than erosion).
+**Security Zones:**
+- **<150m:** Near security (highly monitored)
+- **<300m:** Security-monitored zone
+- **>300m:** Unmonitored area
 
-**Why 2.6m instead of 2.5m?**
-- Prevents artifacts from floating-point precision
-- Ensures proper reconstruction of legitimate open spaces
+### 4.4 Elevation-Aware Analysis
 
-**Step 5: Extract Alleys**
-```python
-alleys = open_space.difference(reconstructed)
-```
-The difference represents narrow corridors that disappeared during erosion:
-- These are the alleys (5-10m wide passages)
-- Separated from larger open areas
+**Terrain Advantage:**
+- Fetches elevation for target (core) and all candidates
+- Compares site elevation vs. target elevation
+- **>10m above:** Score 5 (tactical advantage)
+- **Level (±10m):** Score 3 (neutral)
+- **>10m below:** Score 2 (disadvantage)
 
-**Step 6: Filtering**
-```python
-gdf_alleys = gdf_alleys[(gdf_alleys['area'] > 50) & (gdf_alleys['area'] < 1000)]
-```
-- **Minimum 50m²:** Removes noise and artifacts
-- **Maximum 1000m²:** Excludes large plazas and squares
+### 4.5 Intelligence Reporting
 
-### 2. Line-of-Sight Analysis
-
-**Objective:** Determine if a launch site is visible from the nearest road.
-
-#### Ray-Tracing Algorithm:
-
-```python
-def check_line_of_sight(centroid, nearest_node, G_proj, buildings_union):
-    # Get road node coordinates
-    node_x = G_proj.nodes[nearest_node]['x']
-    node_y = G_proj.nodes[nearest_node]['y']
-    
-    # Create sight line
-    sight_line = LineString([
-        (centroid.x, centroid.y),
-        (node_x, node_y)
-    ])
-    
-    # Check intersection with buildings
-    is_hidden = sight_line.intersects(buildings_union)
-    return is_hidden
-```
-
-**Mathematical Steps:**
-
-1. **Find Centroid:** Calculate geometric center of launch site polygon
-   ```
-   centroid_x = Σ(x_i) / n
-   centroid_y = Σ(y_i) / n
-   ```
-
-2. **Locate Nearest Road Node:** Use graph topology to find closest point in road network
-
-3. **Create Ray:** Construct straight line from centroid to road node
-
-4. **Intersection Test:** Use Shapely's `intersects()` which implements:
-   - Bentley-Ottmann algorithm for line-polygon intersection
-   - Complexity: O(n log n) where n = polygon vertices
-
-5. **Result:**
-   - `True` = Line intersects building → Site is **hidden**
-   - `False` = No intersection → Site is **exposed**
-
-### 3. Road Network Accessibility
-
-**Objective:** Calculate distance from each launch site to the nearest drivable road.
-
-#### Algorithm:
-
-```python
-def calculate_road_accessibility(gdf_candidates, G_proj, buildings_union):
-    for row in gdf_candidates.iterrows():
-        centroid = row.geometry.centroid
-        
-        # Find nearest node in road graph
-        nearest_node = ox.distance.nearest_nodes(G_proj, centroid.x, centroid.y)
-        
-        # Calculate Euclidean distance
-        node_x = G_proj.nodes[nearest_node]['x']
-        node_y = G_proj.nodes[nearest_node]['y']
-        dist = sqrt((centroid.x - node_x)² + (centroid.y - node_y)²)
-```
-
-**Mathematical Approach:**
-- Uses K-D tree spatial index for efficient nearest neighbor search
-- Complexity: O(log n) per query
-- Euclidean distance formula:
-  ```
-  d = √[(x₂ - x₁)² + (y₂ - y₁)²]
-  ```
-
-### 4. Flight Time Estimation
-
-**Objective:** Calculate time for drone to reach target from launch site.
-
-```python
-DRONE_SPEED = 15  # m/s (typical commercial drone, ~50 km/h)
-
-# Distance to center (primary asset)
-dist_to_center = sqrt((centroid.x - center_x)² + (centroid.y - center_y)²)
-
-# Flight time
-est_flight_time = dist_to_center / DRONE_SPEED
-```
-
-**Assumptions:**
-- Constant speed (no acceleration/deceleration)
-- Direct path (no obstacles)
-- No wind effects
-- Standard commercial drone capabilities
+**CSV Export:**
+- Exports all candidates with full metadata
+- Columns: ID, Site Type, Risk Score, Classification, Stealth Status, Altitude, Distance to Target, Road Type, Natural/Land Use Tags, Building Metadata, Security Distance
+- Filename: `DTRAS_Threat_Report.csv`
 
 ---
 
-## Threat Scoring Model
+## 5. Setup & Usage
 
-### Analytical Hierarchy Process (AHP)
+### Prerequisites
 
-The system uses a weighted scoring model to quantify threat level:
+- Python 3.12+
+- Node.js 18+ (for frontend)
+- Internet connection (for OSM and elevation API)
 
-```
-Threat Score = (Access Score × 0.6) + (Stealth Score × 0.4)
-```
+### Installation
 
-### Component 1: Access Score
+**1. Backend Setup:**
 
-**Formula:**
-```python
-if distance_to_road < 50m:
-    access_score = 100
-elif distance_to_road > 500m:
-    access_score = 0
-else:
-    access_score = 100 - ((dist - 50) / (500 - 50)) × 100
-```
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-**Mathematical Representation:**
-```
-         ⎧ 100                              if d < 50
-A(d) =   ⎨ 100 - [(d-50)/450 × 100]        if 50 ≤ d ≤ 500
-         ⎩ 0                                if d > 500
+# Install dependencies
+pip install fastapi uvicorn osmnx geopandas shapely numpy pandas scipy requests
 ```
 
-**Rationale:**
-- Sites < 50m from road: Excellent accessibility (100)
-- Sites > 500m from road: Inaccessible for quick deployment (0)
-- Linear decay between thresholds
+**2. Frontend Setup:**
 
-### Component 2: Stealth Score
-
-**Base Score by Type:**
-```python
-base_stealth = {
-    'Alley': 80,       # High concealment (walls, buildings)
-    'Vegetation': 60   # Moderate concealment (trees, bushes)
-}
+```bash
+cd frontend
+npm install
 ```
 
-**Line-of-Sight Modifier:**
-```python
-if is_hidden:
-    stealth_score = base_stealth + 20    # Bonus for invisibility
-else:
-    stealth_score = base_stealth - 20    # Penalty for visibility
+### Running the System
+
+**1. Start Backend API:**
+
+```bash
+# From project root
+uvicorn api:app --reload --host 0.0.0.0 --port 8000
 ```
 
-**Mathematical Representation:**
-```
-         ⎧ base + 20    if hidden from road
-S(t,v) = ⎨
-         ⎩ base - 20    if visible from road
+API will be available at:
+- **API:** http://localhost:8000
+- **Interactive Docs:** http://localhost:8000/docs
+- **Health Check:** http://localhost:8000/health
 
-where:
-  t = site type
-  v = visibility status
-  base = {80 for alleys, 60 for vegetation}
-```
+**2. Start Frontend:**
 
-### Final Threat Score
-
-```python
-threat_score = min((A(d) × 0.6) + (S(t,v) × 0.4), 100)
+```bash
+# From frontend directory
+npm run dev
 ```
 
-**Score Interpretation:**
-- **80-100:** Critical threat (immediate attention)
-- **50-80:** High threat (priority monitoring)
-- **0-50:** Medium threat (routine surveillance)
+Frontend will be available at:
+- **Web App:** http://localhost:5173
 
-**Example Calculation:**
+### Usage Workflow
 
-Site: Alley, 75m from road, hidden from view
-```
-Access Score:  100 - [(75-50)/450 × 100] = 94.4
-Stealth Score: 80 + 20 = 100 (hidden alley)
-Threat Score:  (94.4 × 0.6) + (100 × 0.4) = 96.64
-Result:        CRITICAL (>80)
-```
+1. **Input Parameters:**
+   - Enter latitude/longitude of primary asset (target)
+   - Set search radius (100-5000 meters)
+   - Click "Scan Area"
 
----
+2. **Analysis Process:**
+   - Backend downloads OSM data (~5-10s)
+   - Performs morphological analysis (~2-3s)
+   - Calculates accessibility and line-of-sight (~2-3s)
+   - Fetches elevation data (~3-5s)
+   - Applies AHP scoring (~1s)
+   - **Total:** ~12-20 seconds
 
-## API Flow
+3. **Results:**
+   - Interactive map with color-coded threat polygons
+   - Statistics panel (total candidates, critical count, etc.)
+   - Click polygons to view detailed threat intelligence
+   - Click sites to display attack vectors
+   - Export CSV report for offline analysis
 
-### Endpoint: POST /analyze
+### API Endpoint
 
-**Request:**
-```json
-{
-  "lat": 28.6139,
-  "lon": 77.2090,
-  "radius": 1000
-}
-```
+**POST /analyze**
 
-**Processing Pipeline:**
-
-1. **Input Validation**
-   - Pydantic model validates data types
-   - Ensures radius between 100-5000m
-
-2. **Data Retrieval** (~5-10 seconds)
-   - Download buildings from OSM
-   - Download natural areas from OSM
-   - Download road network from OSM
-
-3. **Geometric Processing** (~3-5 seconds)
-   - Project to UTM
-   - Apply morphological operations
-   - Calculate centroids
-   - Merge alley and vegetation datasets
-
-4. **Accessibility Analysis** (~2-3 seconds)
-   - Build spatial index
-   - Find nearest road nodes
-   - Calculate distances
-   - Perform line-of-sight checks
-
-5. **Threat Scoring** (~1 second)
-   - Apply AHP formula to each site
-   - Calculate flight metrics
-   - Generate statistics
-
-6. **Response Generation** (~1 second)
-   - Convert to WGS84
-   - Serialize to GeoJSON
-   - Return formatted response
-
-**Total Processing Time:** 12-20 seconds (varies by area complexity)
-
----
-
-## Frontend Visualization
-
-### React Component Architecture
-
-```
-App.jsx
-├── Sidebar (Controls + Stats)
-│   ├── Input Controls (lat, lon, radius)
-│   ├── Scan Button
-│   ├── Statistics Panel
-│   └── Legend
-└── Map Container (Leaflet)
-    ├── Base Tile Layer (OpenStreetMap)
-    ├── Primary Asset Marker
-    ├── GeoJSON Layer (Polygons)
-    └── Active Attack Vector (Polyline)
+```bash
+curl -X POST "http://localhost:8000/analyze" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "lat": 28.6139,
+       "lon": 77.2090,
+       "radius": 1000
+     }'
 ```
 
-### Color Coding System
-
-**Polygons:**
-```javascript
-if (threat_score > 80)  → Red (#ff0000)    // Critical
-if (threat_score > 50)  → Orange (#ff9900) // High
-if (threat_score ≤ 50)  → Yellow (#ffff00) // Medium
-```
-
-**Styling:**
-- Fill Opacity: 0.6
-- Stroke Weight: 1px
-- Stroke Opacity: 0.8
-
-### Interactive Features
-
-**1. Polygon Click:**
-- Displays detailed popup with metrics
-- Shows attack vector line (dashed red)
-- Calculates and renders path to primary asset
-
-**2. Attack Vector:**
-- Only one visible at a time (on-demand)
-- Red dashed line (dashArray: "5, 10")
-- Connects launch site centroid to primary asset
-- Click elsewhere to clear
-
-**3. Popups:**
-- Threat score with color coding
-- Stealth status (Hidden/Exposed)
-- Distance to road
-- Estimated flight time
-- Site type
-
----
-
-## Output Format
-
-### GeoJSON Response Structure
-
+**Response:**
 ```json
 {
   "status": "success",
@@ -509,84 +300,153 @@ if (threat_score ≤ 50)  → Yellow (#ffff00) // Medium
     "medium_count": 9,
     "hidden_count": 28,
     "exposed_count": 14,
-    "alley_count": 31,
-    "vegetation_count": 11,
+    "alley_count": 12,
+    "vegetation_count": 18,
+    "building_count": 12,
     "mean_threat_score": 67.5,
     "max_threat_score": 95.2,
     "mean_flight_time": 45.2,
-    "min_flight_time": 12.5
+    "min_flight_time": 12.5,
+    "near_security_count": 5,
+    "security_monitored_count": 12
   },
-  "features": [
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "Polygon",
-        "coordinates": [[[77.2090, 28.6139], ...]]
-      },
-      "properties": {
-        "id": 0,
-        "type": "Alley",
-        "threat_score": 95.2,
-        "is_hidden": true,
-        "dist_to_road": 127.5,
-        "dist_to_center": 523.4,
-        "est_flight_time": 34.9,
-        "area": 245.6
-      }
-    }
-  ]
+  "features": [...],
+  "security_debug_layer": [...]
 }
 ```
 
-### Statistics Explained
+---
 
-| Metric | Description | Units |
-|--------|-------------|-------|
-| `total_candidates` | Total launch sites identified | count |
-| `critical_count` | Sites with score > 80 | count |
-| `hidden_count` | Sites concealed from roads | count |
-| `mean_threat_score` | Average threat across all sites | 0-100 |
-| `mean_flight_time` | Average time to reach target | seconds |
+## 6. Output Format
 
-### Feature Properties
+### GeoJSON Feature Properties
+
+Each launch site feature includes:
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `threat_score` | float | Overall threat rating (0-100) |
-| `is_hidden` | boolean | Line-of-sight status |
+| `id` | integer | Unique feature identifier |
+| `type` | string | 'Alley', 'Vegetation', or 'Building' |
+| `threat_score` | float | AHP threat score (0-100) |
+| `is_hidden` | boolean | Line-of-sight status (true = hidden) |
 | `dist_to_road` | float | Distance to nearest road (meters) |
 | `dist_to_center` | float | Distance to primary asset (meters) |
-| `est_flight_time` | float | Estimated flight time (seconds) |
-| `type` | string | 'Alley' or 'Vegetation' |
+| `est_flight_time` | float | Estimated flight time at 15 m/s (seconds) |
 | `area` | float | Site area (square meters) |
+| `nearest_security_dist` | float | Distance to nearest security asset (meters, 9999 if none) |
+| `nearest_road_type` | string | OSM highway tag (e.g., 'residential', 'motorway') |
+| `natural_tag` | string | OSM natural tag (e.g., 'water', 'wood') |
+| `landuse_tag` | string | OSM landuse tag (e.g., 'forest', 'grass') |
+| `elevation_z` | float | Elevation in meters (from OpenTopoData) |
+| `levels` | integer | Building floors (Building sites only) |
+| `building_type` | string | Building classification (Building sites only) |
+| `office_type` | string | Office classification (Building sites only) |
+
+### Statistics Explained
+
+| Metric | Description |
+|--------|-------------|
+| `total_candidates` | Total launch sites identified (all types) |
+| `critical_count` | Sites with threat_score > 80 |
+| `high_count` | Sites with threat_score 50-80 |
+| `medium_count` | Sites with threat_score < 50 |
+| `hidden_count` | Sites concealed from roads (is_hidden = true) |
+| `exposed_count` | Sites visible from roads (is_hidden = false) |
+| `alley_count` | Number of alley-type sites |
+| `vegetation_count` | Number of vegetation-type sites |
+| `building_count` | Number of building (rooftop) sites |
+| `mean_threat_score` | Average threat score across all sites |
+| `max_threat_score` | Highest threat score found |
+| `mean_flight_time` | Average estimated flight time (seconds) |
+| `min_flight_time` | Minimum estimated flight time (seconds) |
+| `near_security_count` | Sites within 150m of security assets |
+| `security_monitored_count` | Sites within 300m of security assets |
 
 ---
 
-## Use Cases
+## 7. Mathematical Algorithms
 
-### 1. Critical Infrastructure Protection
-- Identify vulnerable approach vectors
-- Plan defensive countermeasures
-- Optimize sensor placement
+### 7.1 Morphological Alley Detection
 
-### 2. Event Security Planning
-- Assess venues for drone threats
-- Define security perimeters
-- Allocate security resources
+**Algorithm Steps:**
 
-### 3. Urban Planning
-- Evaluate site vulnerability during design phase
-- Identify high-risk areas requiring mitigation
-- Inform building placement decisions
+1. **Define Study Area:**
+   ```python
+   study_area = box(*gdf_buildings_proj.total_bounds)
+   ```
 
-### 4. Threat Intelligence
-- Generate reports on area vulnerability
-- Compare threat profiles across locations
-- Track changes over time
+2. **Calculate Open Space:**
+   ```python
+   buildings_union = unary_union(gdf_buildings_proj.geometry)
+   open_space = study_area.difference(buildings_union)
+   ```
+
+3. **Morphological Erosion:**
+   ```python
+   wide_space = open_space.buffer(-2.0)  # Shrink by 2m
+   ```
+   - Removes gaps narrower than 4m (2m × 2)
+
+4. **Morphological Dilation:**
+   ```python
+   reconstructed = wide_space.buffer(2.1)  # Expand by 2.1m
+   ```
+   - Slightly larger than erosion to prevent precision artifacts
+
+5. **Extract Alleys:**
+   ```python
+   alleys = open_space.difference(reconstructed)
+   ```
+   - Difference = narrow corridors that vanished during erosion
+
+6. **Filtering:**
+   - Area: 25-2000 m²
+   - Remove building edge artifacts (1m buffer check)
+
+### 7.2 Line-of-Sight Ray-Tracing
+
+**Algorithm:**
+```python
+def check_line_of_sight(centroid, nearest_node, G_proj, buildings_union):
+    # Create sight line from site to road
+    sight_line = LineString([
+        (centroid.x, centroid.y),
+        (node_x, node_y)
+    ])
+    
+    # Check intersection with buildings
+    is_hidden = sight_line.intersects(buildings_union)
+    return is_hidden
+```
+
+**Complexity:** O(n log n) per site (Bentley-Ottmann algorithm)
+
+### 7.3 Security Proximity (KD-Tree)
+
+**Algorithm:**
+```python
+from scipy.spatial import cKDTree
+
+# Build spatial index
+security_tree = cKDTree(security_coords)
+
+# Query nearest neighbor
+distances, indices = security_tree.query(candidate_coords, k=1)
+```
+
+**Complexity:** O(log n) per query (vs. O(n) brute force)
+
+### 7.4 Elevation Batch Processing
+
+**Algorithm:**
+- Process coordinates in batches of 50 (API limit)
+- Retry logic: 3 attempts with 30-second timeout
+- Fallback to 0m if API fails
+- Parallel processing for efficiency
 
 ---
 
-## Performance Considerations
+## 8. Performance Considerations
 
 ### Computational Complexity
 
@@ -594,12 +454,13 @@ if (threat_score ≤ 50)  → Yellow (#ffff00) // Medium
 |-----------|-----------|--------------|
 | OSM Data Download | O(n) | 5-10s |
 | Morphological Operations | O(n×m) | 2-3s |
-| Spatial Indexing | O(n log n) | 1s |
+| Spatial Indexing (KD-Tree) | O(n log n) | <1s |
 | Nearest Neighbor Search | O(log n) per query | <1s |
-| Line-of-Sight Check | O(n) per site | 2-3s |
-| Threat Scoring | O(n) | <1s |
+| Line-of-Sight Check | O(n log n) per site | 2-3s |
+| Elevation API Calls | O(n/50) batches | 3-5s |
+| AHP Threat Scoring | O(n) | <1s |
 
-**Total:** ~12-20 seconds for typical 1km radius analysis
+**Total Processing Time:** ~12-20 seconds for typical 1km radius analysis
 
 ### Scalability
 
@@ -609,52 +470,99 @@ if (threat_score ≤ 50)  → Yellow (#ffff00) // Medium
   - Increased OSM data volume
   - More buildings to process
   - Larger road network graph
+  - More elevation API calls
+
+### Optimization Strategies
+
+1. **Caching:** Cache OSM data for repeated queries
+2. **Parallel Processing:** Batch elevation requests
+3. **Spatial Indexing:** KD-Tree for security proximity
+4. **Early Filtering:** Remove invalid candidates before expensive operations
 
 ---
 
-## Future Enhancements
+## 9. Use Cases
 
-1. **Machine Learning Integration**
+### 9.1 Critical Infrastructure Protection
+- Identify vulnerable approach vectors
+- Plan defensive countermeasures (sensor placement, barriers)
+- Optimize security resource allocation
+
+### 9.2 Event Security Planning
+- Assess venues for drone threats before events
+- Define security perimeters dynamically
+- Allocate security resources based on threat density
+
+### 9.3 Urban Planning
+- Evaluate site vulnerability during design phase
+- Identify high-risk areas requiring mitigation
+- Inform building placement decisions
+
+### 9.4 Threat Intelligence
+- Generate reports on area vulnerability
+- Compare threat profiles across multiple locations
+- Track changes over time (historical analysis)
+
+---
+
+## 10. Limitations & Future Enhancements
+
+### Current Limitations
+
+1. **2D Analysis Only:** Does not consider building heights or 3D line-of-sight
+2. **Static Data:** Uses snapshot of OSM data (not real-time updates)
+3. **Weather Effects:** No wind, visibility, or seasonal vegetation changes
+4. **Drone Capabilities:** Assumes standard commercial drone (15 m/s, direct path)
+
+### Planned Enhancements
+
+1. **3D Analysis:**
+   - Building height consideration (OSM `building:levels`)
+   - Vertical line-of-sight calculations
+   - Elevation-aware flight paths
+
+2. **Machine Learning Integration:**
    - Train model on historical drone incidents
    - Predict high-risk patterns
-   - Automated feature weighting
+   - Automated feature weighting optimization
 
-2. **Real-Time Monitoring**
+3. **Real-Time Monitoring:**
    - WebSocket integration for live updates
    - Change detection algorithms
    - Alert system for new threats
 
-3. **3D Analysis**
-   - Building height consideration
-   - Vertical line-of-sight
-   - Elevation-aware flight paths
-
-4. **Weather Integration**
-   - Wind speed/direction effects
-   - Visibility conditions
+4. **Weather Integration:**
+   - Wind speed/direction effects on flight time
+   - Visibility conditions (fog, rain)
    - Seasonal vegetation changes
 
+5. **Advanced Visualization:**
+   - 3D terrain rendering
+   - Heat maps for threat density
+   - Time-series analysis
+
 ---
 
-## References
+## 11. References
 
 ### Academic Foundations
-- Morphological Image Processing (Serra, 1982)
-- Computational Geometry (de Berg et al., 2008)
-- Analytic Hierarchy Process (Saaty, 1980)
+- **Analytic Hierarchy Process (AHP):** Saaty, T.L. (1980). *The Analytic Hierarchy Process*
+- **Morphological Image Processing:** Serra, J. (1982). *Image Analysis and Mathematical Morphology*
+- **Computational Geometry:** de Berg, M., et al. (2008). *Computational Geometry: Algorithms and Applications*
 
 ### Technical Standards
-- GeoJSON Specification (RFC 7946)
-- Web Mercator Projection (EPSG:3857)
-- WGS84 Coordinate System (EPSG:4326)
+- **GeoJSON Specification:** RFC 7946
+- **WGS84 Coordinate System:** EPSG:4326
+- **UTM Projection:** EPSG:326XX (varies by location)
 
 ### Data Sources
-- OpenStreetMap Contributors
-- OSMnx Documentation (Boeing, 2017)
+- **OpenStreetMap:** https://www.openstreetmap.org/
+- **OpenTopoData API:** https://www.opentopodata.org/
+- **OSMnx Documentation:** Boeing, G. (2017). *OSMnx: New Methods for Acquiring, Constructing, Analyzing, and Visualizing Complex Street Networks*
 
 ---
 
-## License & Disclaimer
+## 12. License & Disclaimer
 
 **For Educational and Security Research Purposes**
 
@@ -665,3 +573,18 @@ This system is designed for legitimate security assessments and research. Users 
 - Security research ethics
 
 **Not for Malicious Use**
+
+The system is intended to help security professionals protect critical infrastructure, not to facilitate attacks. Any misuse of this tool is strictly prohibited.
+
+---
+
+## 13. Version History
+
+- **v2.0 (Current):** AHP-based scoring, security proximity, elevation analysis, building rooftops
+- **v1.0 (Legacy):** Simple 2-factor scoring, basic alley/vegetation detection (see `legacy_main_v1.py`)
+
+---
+
+**Documentation Version:** 2.0  
+**Last Updated:** 2024  
+**System Version:** DTRAS v2.0

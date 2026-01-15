@@ -47,6 +47,83 @@ function App() {
     }
   };
 
+  const downloadCSV = () => {
+    if (!data || !data.features || data.features.length === 0) {
+      return;
+    }
+
+    // Map features to CSV rows
+    const rows = data.features.map((feature) => {
+      const props = feature.properties;
+      
+      // Determine classification based on threat score
+      let classification = 'Medium';
+      if (props.threat_score > 80) {
+        classification = 'Critical';
+      } else if (props.threat_score > 50) {
+        classification = 'High';
+      }
+      
+      // Format stealth status
+      const stealthStatus = props.is_hidden ? 'Hidden' : 'Exposed';
+      
+      // Format distance to target (convert meters to km if > 1000m)
+      const distToTarget = props.dist_to_center 
+        ? (props.dist_to_center >= 1000 
+          ? `${(props.dist_to_center / 1000).toFixed(2)} km` 
+          : `${Math.round(props.dist_to_center)} m`)
+        : 'N/A';
+      
+      return {
+        'ID': props.id ?? '',
+        'Site Type': props.type ?? '',
+        'Risk Score': props.threat_score ? props.threat_score.toFixed(1) : 'N/A',
+        'Classification': classification,
+        'Stealth': stealthStatus,
+        'Altitude (m)': props.elevation_z ? Math.round(props.elevation_z) : 'N/A',
+        'Distance to Target': distToTarget,
+        'Nearest Road Type': props.nearest_road_type ? props.nearest_road_type.charAt(0).toUpperCase() + props.nearest_road_type.slice(1) : 'N/A',
+        'Road Distance (m)': props.dist_to_road ? Math.round(props.dist_to_road) : 'N/A',
+        'Natural Tag': props.natural_tag || '',
+        'Land Use Tag': props.landuse_tag || '',
+        'Building Type': props.building_type || '',
+        'Building Levels': props.levels || '',
+        'Security Distance (m)': props.nearest_security_dist < 999 ? Math.round(props.nearest_security_dist) : 'None'
+      };
+    });
+
+    // Create CSV header
+    const headers = Object.keys(rows[0]);
+    const csvHeader = headers.join(',');
+    
+    // Create CSV rows
+    const csvRows = rows.map(row => 
+      headers.map(header => {
+        const value = row[header];
+        // Escape commas and quotes in values
+        if (typeof value === 'string' && (value.includes(',') || value.includes('"'))) {
+          return `"${value.replace(/"/g, '""')}"`;
+        }
+        return value;
+      }).join(',')
+    );
+    
+    // Combine header and rows
+    const csvContent = [csvHeader, ...csvRows].join('\n');
+    
+    // Create Blob and trigger download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'DTRAS_Threat_Report.csv');
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const getFeatureStyle = (feature) => {
     const props = feature.properties;
     const score = props.threat_score;
@@ -132,46 +209,58 @@ function App() {
       return;
     }
     
-    // Launch site logic (Polygon/MultiPolygon)
-    const stealthStatus = props.is_hidden ? 'Hidden' : 'Exposed';
-    const riskLevel = props.threat_score > 80 ? 'CRITICAL' : props.threat_score > 50 ? 'HIGH' : 'MEDIUM';
+    // Launch site logic (Polygon/MultiPolygon) - Intelligence Profile
+    // Format values with graceful handling of missing data
+    const distCore = props.dist_to_center ? (props.dist_to_center / 1000).toFixed(2) + ' km' : 'N/A';
+    const roadType = props.nearest_road_type || 'Unknown';
+    const distToRoad = props.dist_to_road ? Math.round(props.dist_to_road) + 'm' : 'N/A';
+    
+    // Determine LULC (Land Use / Land Cover) - prioritize natural_tag, then landuse_tag, then type
+    const lulc = props.natural_tag || props.landuse_tag || props.type || 'Unknown';
+    
+    // Format threat score
+    const score = props.threat_score ? props.threat_score.toFixed(1) : 'N/A';
+    
+    // Determine color class based on score
+    const scoreColor = props.threat_score > 80 ? '#ff0000' : props.threat_score > 50 ? '#ffa500' : '#28a745';
+    
+    // Building-specific information
+    const buildingType = props.building_type || props.office_type || 'Generic';
+    const buildingLevels = props.levels || 2;
     
     const popupContent = `
-      <div style="font-family: 'Arial', sans-serif; min-width: 250px;">
-        <h3 style="margin: 0 0 12px 0; color: #333; border-bottom: 2px solid #666; padding-bottom: 8px; font-size: 16px;">
-          Launch Site Detected
-        </h3>
-        <p style="margin: 8px 0; font-size: 14px;">
-          <b>Risk Score:</b> 
-          <span style="color: ${props.threat_score > 80 ? '#ff0000' : props.threat_score > 50 ? '#ff9900' : '#ffff00'}; font-weight: bold; font-size: 18px;">
-            ${props.threat_score.toFixed(1)}/100
-          </span>
-          <span style="color: #666; font-size: 12px;"> (${riskLevel})</span>
-        </p>
-        <p style="margin: 8px 0; font-size: 14px;">
-          <b>Stealth:</b> 
-          <span style="color: ${props.is_hidden ? '#ff0000' : '#00aaff'}; font-weight: bold;">
-            ${stealthStatus}
-          </span>
-        </p>
-        <p style="margin: 8px 0; font-size: 14px;">
-          <b>Distance to Road:</b> ${props.dist_to_road.toFixed(1)} m
-        </p>
-        <p style="margin: 8px 0; font-size: 14px;">
-          <b>Flight Time:</b> ${props.est_flight_time.toFixed(1)}s
-        </p>
-        <p style="margin: 8px 0; font-size: 14px;">
-          <b>Security Distance:</b> 
-          <span style="color: ${props.nearest_security_dist < 150 ? '#00aa00' : props.nearest_security_dist < 300 ? '#ff9900' : '#ff0000'}; font-weight: bold;">
-            ${props.nearest_security_dist < 999 ? props.nearest_security_dist.toFixed(0) + 'm' : 'None nearby'}
-          </span>
-        </p>
-        <p style="margin: 8px 0; font-size: 12px; color: #666; border-top: 1px solid #ddd; padding-top: 8px;">
-          <b>Type:</b> <span style="text-transform: capitalize; color: ${feature.properties.type === 'Alley' ? '#ff6600' : feature.properties.type === 'Building' ? '#0066ff' : '#00aa00'}; font-weight: bold;">${feature.properties.type}</span>
-        </p>
-        <p style="margin: 8px 0; font-size: 11px; color: #999; font-style: italic;">
-          Click polygon to show attack vector
-        </p>
+      <div style="font-family: sans-serif; min-width: 200px;">
+        <div style="background: ${scoreColor}; color: white; padding: 5px 10px; border-radius: 4px 4px 0 0; font-weight: bold; font-size: 13px;">
+          ${props.type ? props.type.toUpperCase() : 'UNKNOWN'} - SCORE: ${score}
+        </div>
+        <div style="padding: 10px; border: 1px solid #ccc; border-top: none; border-radius: 0 0 4px 4px; background: #fafafa;">
+          
+          <div style="margin-bottom: 8px;">
+            <strong style="color: #555; font-size: 0.9em;">TACTICAL (Stealth)</strong><br/>
+            • Status: <b style="color: ${props.is_hidden ? '#ff0000' : '#28a745'}">${props.is_hidden ? 'HIDDEN (High Risk)' : 'EXPOSED (Low Risk)'}</b><br/>
+            • Cover: <span style="text-transform: capitalize;">${lulc}</span>
+          </div>
+
+          <div style="margin-bottom: 8px;">
+            <strong style="color: #555; font-size: 0.9em;">ACCESSIBILITY</strong><br/>
+            • Road: <span style="text-transform: capitalize;">${roadType}</span> (${distToRoad})<br/>
+            • Core Dist: ${distCore}<br/>
+            • Altitude: ${Math.round(props.elevation_z || 0)}m
+          </div>
+          
+          ${props.type === 'Building' ? `
+          <div style="margin-bottom: 8px; border-top: 1px dashed #eee; padding-top: 5px;">
+            <strong style="color: #555; font-size: 0.9em;">STRUCTURAL</strong><br/>
+            • Category: <span style="text-transform: capitalize;">${buildingType}</span><br/>
+            • Height: ${buildingLevels} Floors
+          </div>
+          ` : ''}
+          
+          <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed #eee; font-size: 0.85em; color: #666;">
+            <em>Select site to display threat vector</em>
+          </div>
+
+        </div>
       </div>
     `;
     layer.bindPopup(popupContent);
@@ -248,6 +337,21 @@ function App() {
             )}
           </button>
 
+          {data && data.features && data.features.length > 0 && (
+            <button
+              className="scan-button"
+              onClick={downloadCSV}
+              style={{
+                marginTop: '10px',
+                backgroundColor: '#1e3a5f',
+                borderColor: '#1e3a5f',
+                color: '#ffffff'
+              }}
+            >
+              Export Threat Intelligence Report
+            </button>
+          )}
+
           {error && (
             <div className="error-message">
               <strong>Error:</strong> {error}
@@ -265,7 +369,7 @@ function App() {
                 <div className="stat-item critical">
                   <span className="stat-label">Critical (&gt;80)</span>
                   <span className="stat-value">{data.stats.critical_count}</span>
-                  <span className="stat-sublabel">Click sites to view vectors</span>
+                  <span className="stat-sublabel">Select sites to display threat vectors</span>
                 </div>
                 <div className="stat-item">
                   <span className="stat-label">Hidden Sites</span>
@@ -310,10 +414,10 @@ function App() {
                 <div style={{marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #334155'}}>
                   <div className="legend-item">
                     <span style={{display: 'inline-block', width: '24px', height: '2px', backgroundColor: '#ff0000', borderStyle: 'dashed'}}></span>
-                    <span style={{fontSize: '12px'}}>Attack Vector (On Click)</span>
+                    <span style={{fontSize: '12px'}}>Threat Vector</span>
                   </div>
                   <p style={{fontSize: '11px', color: '#64748b', margin: '8px 0 0 0', fontStyle: 'italic'}}>
-                    Click any polygon to show attack path
+                    Select site to display threat vector
                   </p>
                 </div>
               </div>
@@ -389,9 +493,9 @@ function App() {
             >
               <Popup>
                 <div style={{ fontFamily: 'Arial, sans-serif' }}>
-                  <strong>Attack Vector</strong>
+                  <strong>Threat Vector</strong>
                   <p style={{ margin: '4px 0', fontSize: '12px' }}>
-                    Click another site or map to clear
+                    Select another site or map area to clear
                   </p>
                 </div>
               </Popup>
